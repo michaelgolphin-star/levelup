@@ -11,7 +11,7 @@ import { ensureDb } from "./storage.js";
 
 dotenv.config();
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 8080);
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
@@ -25,24 +25,27 @@ app.use(
     windowMs: 15 * 60 * 1000,
     max: 300,
     standardHeaders: true,
-    legacyHeaders: false
-  })
+    legacyHeaders: false,
+  }),
 );
 
 ensureDb();
 
 registerRoutes(app);
 
-// Serve built client in production
+// Serve built client (Vite build output)
+// NOTE: In your build logs, Vite outputs to /dist, not /client/dist
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const distPath = path.resolve(__dirname, "../client/dist");
+const distPath = path.resolve(__dirname, "../dist");
 app.use(express.static(distPath));
+
+// SPA fallback
 app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Server listening on http://127.0.0.1:${PORT}`);
+  console.log(`✅ Server listening on port ${PORT}`);
 });
