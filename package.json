@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n server,client -c auto \"tsx watch server/index.ts\" \"cd client && vite\"",
-    "build": "cd client && vite build && cd .. && tsx server/build.ts",
+    "dev": "concurrently -n server,client -c auto \"tsx watch server/index.ts\" \"vite\"",
+    "build": "vite build && tsx server/build.ts",
     "start": "node server/dist/index.js",
     "seed": "tsx server/seed.ts"
   },
