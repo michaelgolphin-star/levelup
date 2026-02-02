@@ -9,6 +9,7 @@
     "lib": ["ES2022"],
     "types": ["node"],
     "jsx": "preserve",
+    "typeRoots": ["./node_modules/@types", "./server"],
     "noEmit": false
   },
   "include": ["server/**/*.ts", "server/**/*.d.ts", "shared/**/*.ts"]
