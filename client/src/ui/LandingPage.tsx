@@ -12,7 +12,7 @@ export default function LandingPage() {
             <h1>Level Up</h1>
             <div className="sub">Structure for real life — built for people and programs.</div>
           </div>
-          <span className="badge">Consistency > motivation</span>
+          <span className="badge">Consistency &gt; motivation</span>
         </div>
         <div className="body">
           <div className="row">
