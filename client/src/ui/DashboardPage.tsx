@@ -802,7 +802,7 @@ function OrgPanel({ role, myUserId }: { role: Role; myUserId: string }) {
 }
 
 
-export default function DashboardPageexport default function DashboardPage() {
+export default function DashboardPage() {
   const [tab, setTab] = React.useState<Tab>("checkin");
   const [checkins, setCheckins] = React.useState<CheckIn[]>([]);
   const [habits, setHabits] = React.useState<Habit[]>([]);
