@@ -2,9 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  root: "client",
   plugins: [react()],
-
+  root: "client",
   server: {
     port: 5173,
     proxy: {
@@ -14,9 +13,7 @@ export default defineConfig({
       },
     },
   },
-
   build: {
-    // IMPORTANT: build frontend into /dist at project root
     outDir: "../dist",
     emptyOutDir: true,
   },
