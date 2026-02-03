@@ -4,7 +4,6 @@ import helmet from "helmet";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { registerRoutes } from "./routes.js";
@@ -15,10 +14,6 @@ dotenv.config();
 const PORT = Number(process.env.PORT || 8080);
 
 const app = express();
-
-// Railway sits behind a proxy
-app.set("trust proxy", 1);
-
 app.use(cors({ origin: true, credentials: true }));
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
@@ -31,34 +26,65 @@ app.use(
     max: 300,
     standardHeaders: true,
     legacyHeaders: false,
-  })
+  }),
 );
 
 ensureDb();
 registerRoutes(app);
 
-// Serve built client (Vite build output)
+// ---------- Static frontend serving (Railway/Prod-safe) ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const distPath = path.resolve(__dirname, "../dist");
-const indexHtml = path.join(distPath, "index.html");
+// When compiled, this file lives in: server/dist/index.js
+// The Vite build output lives in: <root>/dist
+// So from server/dist -> ../../dist
+const distCandidates = [
+  path.resolve(__dirname, "../../dist"),
+  path.resolve(__dirname, "../dist"), // useful if running uncompiled in some environments
+  path.resolve(process.cwd(), "dist"),
+  path.resolve(process.cwd(), "client", "dist"),
+];
 
-if (fs.existsSync(indexHtml)) {
-  app.use(express.static(distPath));
+const distPath =
+  distCandidates.find((p) => {
+    try {
+      return (
+        !!p &&
+        require("node:fs").existsSync(p) &&
+        require("node:fs").existsSync(path.join(p, "index.html"))
+      );
+    } catch {
+      return false;
+    }
+  }) || distCandidates[0];
 
-  // SPA fallback
-  app.get("*", (_req, res) => {
-    res.sendFile(indexHtml);
+try {
+  const fs = await import("node:fs");
+  if (fs.existsSync(path.join(distPath, "index.html"))) {
+    app.use(express.static(distPath));
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
+  } else {
+    app.get("/", (_req, res) => {
+      res
+        .status(200)
+        .send(
+          "API is running. Frontend build not found. Expected index.html in one of: " +
+            distCandidates.join(", "),
+        );
+    });
+  }
+} catch {
+  app.get("/", (_req, res) => {
+    res
+      .status(200)
+      .send(
+        "API is running. Frontend build not found. Expected index.html in one of: " +
+          distCandidates.join(", "),
+      );
   });
-
-  console.log(`✅ Serving frontend from: ${distPath}`);
-} else {
-  console.warn(`⚠️ Frontend not found at: ${indexHtml}`);
-
-  // Keep API working even if frontend isn't present
-  app.get("/", (_req, res) => res.status(200).send("API is running. Frontend build not found."));
 }
+// ---------------------------------------------------------------
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server listening on port ${PORT}`);
