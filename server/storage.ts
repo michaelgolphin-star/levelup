@@ -1,28 +1,59 @@
-console.log("🟢 ensureDb() FILE LOADED");
-import Database from "better-sqlite3";
-import path from "path";
+import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
 import type { Role } from "./types.js";
 
-const DB_FILE = process.env.SQLITE_FILE || path.resolve("server", "data.sqlite");
-
-let db: Database.Database | null = null;
-
-export function getDb() {
-  if (!db) {
-    db = new Database(DB_FILE);
-    db.pragma("journal_mode = WAL");
-  }
-  return db;
+/**
+ * Postgres storage (Railway friendly)
+ *
+ * Required env:
+ *   DATABASE_URL=postgres://...
+ * Optional:
+ *   PGSSLMODE=require   (Railway often works without this, but some setups need it)
+ */
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is not set. Add Railway Postgres and set DATABASE_URL.");
 }
 
-export function ensureDb() {
-  export async function ensureDb() {
-  console.log("🟢 ensureDb() FUNCTION CALLED");
-  // existing code below;
-  const d = getDb();
-  d.exec(`
+// Railway Postgres generally works with ssl enabled in many environments;
+// but some local/dev URLs don't. We use a conservative default:
+// - if PGSSLMODE=require or the URL includes ?sslmode=require => ssl on
+// - else ssl off (works locally)
+const sslRequired =
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
+  DATABASE_URL.toLowerCase().includes("sslmode=require");
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: sslRequired ? { rejectUnauthorized: false } : undefined,
+});
+
+async function q<T = any>(text: string, params: any[] = []) {
+  const res = await pool.query(text, params);
+  return res.rows as T[];
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function dayKeyFromIso(iso: string) {
+  return iso.slice(0, 10);
+}
+
+function normalizeUsername(username: string) {
+  return username.trim().toLowerCase();
+}
+
+function toInt(v: any, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function ensureDb() {
+  // Tables
+  await q(`
     CREATE TABLE IF NOT EXISTS orgs (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -33,189 +64,185 @@ export function ensureDb() {
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
-      org_id TEXT NOT NULL,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (org_id) REFERENCES orgs(id)
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS checkins (
       id TEXT PRIMARY KEY,
-      org_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       ts TEXT NOT NULL,
       day_key TEXT NOT NULL,
       mood INTEGER NOT NULL,
       energy INTEGER NOT NULL,
       stress INTEGER NOT NULL,
       note TEXT,
-      tags_json TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (org_id) REFERENCES orgs(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS habits (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      target_per_week INTEGER NOT NULL,
+      archived_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS invites (
+      token TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      full_name TEXT,
+      email TEXT,
+      phone TEXT,
+      tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_notes (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      ts TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  // Indexes
+  await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_ts ON checkins(user_id, ts);
 
-    CREATE TABLE IF NOT EXISTS habits (
-      id TEXT PRIMARY KEY,
-      org_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      target_per_week INTEGER NOT NULL,
-      archived_at TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (org_id) REFERENCES orgs(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
-
     CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id, archived_at);
 
-CREATE TABLE IF NOT EXISTS invites (
-  token TEXT PRIMARY KEY,
-  org_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  created_by TEXT NOT NULL,
-  FOREIGN KEY (org_id) REFERENCES orgs(id),
-  FOREIGN KEY (created_by) REFERENCES users(id)
-);
+    CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_pwreset_user ON password_resets(user_id, expires_at);
 
-CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id);
 
-CREATE TABLE IF NOT EXISTS password_resets (
-  token TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  org_id TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  created_by TEXT NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id),
-  FOREIGN KEY (org_id) REFERENCES orgs(id),
-  FOREIGN KEY (created_by) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_pwreset_user ON password_resets(user_id, expires_at);
-
-CREATE TABLE IF NOT EXISTS user_profiles (
-  user_id TEXT PRIMARY KEY,
-  org_id TEXT NOT NULL,
-  full_name TEXT,
-  email TEXT,
-  phone TEXT,
-  tags_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id),
-  FOREIGN KEY (org_id) REFERENCES orgs(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id);
-
-CREATE TABLE IF NOT EXISTS user_notes (
-  id TEXT PRIMARY KEY,
-  org_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  author_id TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  note TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  FOREIGN KEY (org_id) REFERENCES orgs(id),
-  FOREIGN KEY (user_id) REFERENCES users(id),
-  FOREIGN KEY (author_id) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts);
   `);
-
-  // Basic integrity: ensure roles are constrained by application; DB keeps TEXT.
-}
-
-export function nowIso() {
-  return new Date().toISOString();
-}
-
-export function dayKeyFromIso(iso: string) {
-  return iso.slice(0, 10);
 }
 
 /** Orgs */
-export function createOrg(name: string) {
-  const d = getDb();
-  const org = { id: nanoid(), name, createdAt: nowIso() };
-  d.prepare("INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)").run(org.id, org.name, org.createdAt);
+export async function createOrg(name: string) {
+  const org = { id: nanoid(), name: name.trim(), createdAt: nowIso() };
+  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [
+    org.id,
+    org.name,
+    org.createdAt,
+  ]);
   return org;
 }
 
-export function getOrg(orgId: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT id, name, created_at FROM orgs WHERE id = ?").get(orgId) as any;
+export async function getOrg(orgId: string) {
+  const rows = await q<{ id: string; name: string; created_at: string }>(
+    "SELECT id, name, created_at FROM orgs WHERE id = $1",
+    [orgId],
+  );
+  const row = rows[0];
   if (!row) return null;
   return { id: row.id, name: row.name, createdAt: row.created_at };
 }
 
 /** Users */
-export function createUser(params: { username: string; password: string; orgId: string; role: Role }) {
-  const d = getDb();
+export async function createUser(params: { username: string; password: string; orgId: string; role: Role }) {
   const user = {
     id: nanoid(),
-    username: params.username.trim().toLowerCase(),
+    username: normalizeUsername(params.username),
     passwordHash: hashPassword(params.password),
     orgId: params.orgId,
     role: params.role,
-    createdAt: nowIso()
+    createdAt: nowIso(),
   };
-  d.prepare(
-    "INSERT INTO users (id, username, password_hash, org_id, role, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(user.id, user.username, user.passwordHash, user.orgId, user.role, user.createdAt);
+
+  await q(
+    "INSERT INTO users (id, username, password_hash, org_id, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    [user.id, user.username, user.passwordHash, user.orgId, user.role, user.createdAt],
+  );
+
   return user;
 }
 
-export function findUserByUsername(username: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT * FROM users WHERE username = ?").get(username.trim().toLowerCase()) as any;
+export async function findUserByUsername(username: string) {
+  const u = normalizeUsername(username);
+  const rows = await q<any>("SELECT * FROM users WHERE username = $1", [u]);
+  const row = rows[0];
   if (!row) return null;
   return {
     id: row.id,
     username: row.username,
     passwordHash: row.password_hash,
     orgId: row.org_id,
-    role: row.role,
-    createdAt: row.created_at
+    role: row.role as Role,
+    createdAt: row.created_at,
   };
 }
 
-export function getUserById(userId: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+export async function getUserById(userId: string) {
+  const rows = await q<any>("SELECT * FROM users WHERE id = $1", [userId]);
+  const row = rows[0];
   if (!row) return null;
   return {
     id: row.id,
     username: row.username,
     passwordHash: row.password_hash,
     orgId: row.org_id,
-    role: row.role,
-    createdAt: row.created_at
+    role: row.role as Role,
+    createdAt: row.created_at,
   };
 }
 
-export function listUsers(orgId: string) {
-  const d = getDb();
-  const rows = d.prepare("SELECT id, username, org_id, role, created_at FROM users WHERE org_id = ? ORDER BY created_at DESC").all(orgId) as any[];
-  return rows.map(r => ({ id: r.id, username: r.username, orgId: r.org_id, role: r.role, createdAt: r.created_at }));
+export async function listUsers(orgId: string) {
+  const rows = await q<any>(
+    "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
+    [orgId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    username: r.username,
+    orgId: r.org_id,
+    role: r.role as Role,
+    createdAt: r.created_at,
+  }));
 }
 
-export function setUserRole(orgId: string, userId: string, role: Role) {
-  const d = getDb();
-  const info = d.prepare("UPDATE users SET role = ? WHERE id = ? AND org_id = ?").run(role, userId, orgId);
-  return info.changes > 0;
+export async function setUserRole(orgId: string, userId: string, role: Role) {
+  const rows = await q<{ count: string }>(
+    "WITH upd AS (UPDATE users SET role = $1 WHERE id = $2 AND org_id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
+    [role, userId, orgId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 /** Check-ins */
-export function createCheckIn(params: {
+export async function createCheckIn(params: {
   orgId: string;
   userId: string;
   ts?: string;
@@ -225,7 +252,6 @@ export function createCheckIn(params: {
   note?: string | null;
   tags?: string[];
 }) {
-  const d = getDb();
   const ts = params.ts || nowIso();
   const checkin = {
     id: nanoid(),
@@ -236,41 +262,53 @@ export function createCheckIn(params: {
     mood: params.mood,
     energy: params.energy,
     stress: params.stress,
-    note: (params.note ?? null),
-    tagsJson: JSON.stringify(params.tags ?? []),
-    createdAt: nowIso()
+    note: params.note ?? null,
+    tags: params.tags ?? [],
+    createdAt: nowIso(),
   };
-  d.prepare(
+
+  await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    checkin.id, checkin.orgId, checkin.userId, checkin.ts, checkin.dayKey,
-    checkin.mood, checkin.energy, checkin.stress, checkin.note, checkin.tagsJson, checkin.createdAt
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      checkin.id,
+      checkin.orgId,
+      checkin.userId,
+      checkin.ts,
+      checkin.dayKey,
+      checkin.mood,
+      checkin.energy,
+      checkin.stress,
+      checkin.note,
+      JSON.stringify(checkin.tags),
+      checkin.createdAt,
+    ],
   );
+
   return checkin;
 }
 
-export function listCheckIns(params: { orgId: string; userId?: string; dayKey?: string; limit?: number }) {
-  const d = getDb();
+export async function listCheckIns(params: { orgId: string; userId?: string; dayKey?: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 200, 500));
 
-  let sql = "SELECT * FROM checkins WHERE org_id = ?";
+  const where: string[] = ["org_id = $1"];
   const args: any[] = [params.orgId];
+  let i = 2;
 
   if (params.userId) {
-    sql += " AND user_id = ?";
+    where.push(`user_id = $${i++}`);
     args.push(params.userId);
   }
   if (params.dayKey) {
-    sql += " AND day_key = ?";
+    where.push(`day_key = $${i++}`);
     args.push(params.dayKey);
   }
 
-  sql += " ORDER BY ts DESC LIMIT ?";
   args.push(limit);
+  const sql = `SELECT * FROM checkins WHERE ${where.join(" AND ")} ORDER BY ts DESC LIMIT $${i}`;
 
-  const rows = d.prepare(sql).all(...args) as any[];
-  return rows.map(r => ({
+  const rows = await q<any>(sql, args);
+  return rows.map((r) => ({
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
@@ -280,79 +318,85 @@ export function listCheckIns(params: { orgId: string; userId?: string; dayKey?: 
     energy: r.energy,
     stress: r.stress,
     note: r.note,
-    tagsJson: r.tags_json,
-    createdAt: r.created_at
+    tagsJson: JSON.stringify(r.tags_json ?? []),
+    createdAt: r.created_at,
   }));
 }
 
-export function deleteCheckIn(orgId: string, userId: string, checkInId: string) {
-  const d = getDb();
-  const info = d.prepare("DELETE FROM checkins WHERE id = ? AND org_id = ? AND user_id = ?").run(checkInId, orgId, userId);
-  return info.changes > 0;
+export async function deleteCheckIn(orgId: string, userId: string, checkInId: string) {
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM checkins WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [checkInId, orgId, userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 /** Habits */
-export function createHabit(params: { orgId: string; userId: string; name: string; targetPerWeek: number }) {
-  const d = getDb();
+export async function createHabit(params: { orgId: string; userId: string; name: string; targetPerWeek: number }) {
   const habit = {
     id: nanoid(),
     orgId: params.orgId,
     userId: params.userId,
     name: params.name.trim(),
     targetPerWeek: params.targetPerWeek,
+    archivedAt: null as string | null,
     createdAt: nowIso(),
-    archivedAt: null as string | null
   };
-  d.prepare(
-    "INSERT INTO habits (id, org_id, user_id, name, target_per_week, archived_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).run(habit.id, habit.orgId, habit.userId, habit.name, habit.targetPerWeek, habit.archivedAt, habit.createdAt);
+
+  await q(
+    `INSERT INTO habits (id, org_id, user_id, name, target_per_week, archived_at, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [habit.id, habit.orgId, habit.userId, habit.name, habit.targetPerWeek, habit.archivedAt, habit.createdAt],
+  );
+
   return habit;
 }
 
-export function listHabits(params: { orgId: string; userId: string; includeArchived?: boolean }) {
-  const d = getDb();
+export async function listHabits(params: { orgId: string; userId: string; includeArchived?: boolean }) {
   const includeArchived = !!params.includeArchived;
-  const rows = d.prepare(
-    `SELECT * FROM habits WHERE org_id = ? AND user_id = ? ${includeArchived ? "" : "AND archived_at IS NULL"} ORDER BY created_at DESC`
-  ).all(params.orgId, params.userId) as any[];
-  return rows.map(r => ({
+  const sql = `SELECT * FROM habits WHERE org_id = $1 AND user_id = $2 ${
+    includeArchived ? "" : "AND archived_at IS NULL"
+  } ORDER BY created_at DESC`;
+  const rows = await q<any>(sql, [params.orgId, params.userId]);
+  return rows.map((r) => ({
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
     name: r.name,
     targetPerWeek: r.target_per_week,
     archivedAt: r.archived_at,
-    createdAt: r.created_at
+    createdAt: r.created_at,
   }));
 }
 
-export function archiveHabit(orgId: string, userId: string, habitId: string) {
-  const d = getDb();
-  const info = d.prepare("UPDATE habits SET archived_at = ? WHERE id = ? AND org_id = ? AND user_id = ?").run(nowIso(), habitId, orgId, userId);
-  return info.changes > 0;
+export async function archiveHabit(orgId: string, userId: string, habitId: string) {
+  const rows = await q<{ count: string }>(
+    "WITH upd AS (UPDATE habits SET archived_at = $1 WHERE id = $2 AND org_id = $3 AND user_id = $4 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
+    [nowIso(), habitId, orgId, userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 /** Analytics */
-export function summaryForUser(params: { orgId: string; userId: string; days?: number }) {
-  const d = getDb();
+export async function summaryForUser(params: { orgId: string; userId: string; days?: number }) {
   const days = Math.max(7, Math.min(params.days ?? 30, 365));
-  const since = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10); // dayKey min
+  const since = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  const rows = d.prepare(
+  const byDay = await q<any>(
     `SELECT day_key,
-            AVG(mood) as mood_avg,
-            AVG(energy) as energy_avg,
-            AVG(stress) as stress_avg,
-            COUNT(*) as count
+            AVG(mood)::float as mood_avg,
+            AVG(energy)::float as energy_avg,
+            AVG(stress)::float as stress_avg,
+            COUNT(*)::int as count
      FROM checkins
-     WHERE org_id = ? AND user_id = ? AND day_key >= ?
+     WHERE org_id = $1 AND user_id = $2 AND day_key >= $3
      GROUP BY day_key
-     ORDER BY day_key ASC`
-  ).all(params.orgId, params.userId, since) as any[];
+     ORDER BY day_key ASC`,
+    [params.orgId, params.userId, since],
+  );
 
+  const set = new Set(byDay.map((r: any) => r.day_key));
   let streak = 0;
-  // compute streak: consecutive days up to today with at least one check-in
-  const set = new Set(rows.map(r => r.day_key));
   const today = new Date().toISOString().slice(0, 10);
   for (let i = 0; i < 365; i++) {
     const day = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -360,113 +404,115 @@ export function summaryForUser(params: { orgId: string; userId: string; days?: n
     else break;
   }
 
-  const overall = d.prepare(
-    `SELECT AVG(mood) as mood_avg,
-            AVG(energy) as energy_avg,
-            AVG(stress) as stress_avg,
-            COUNT(*) as total
+  const overallRows = await q<any>(
+    `SELECT AVG(mood)::float as mood_avg,
+            AVG(energy)::float as energy_avg,
+            AVG(stress)::float as stress_avg,
+            COUNT(*)::int as total
      FROM checkins
-     WHERE org_id = ? AND user_id = ?`
-  ).get(params.orgId, params.userId) as any;
+     WHERE org_id = $1 AND user_id = $2`,
+    [params.orgId, params.userId],
+  );
+  const overall = overallRows[0] || {};
 
   return {
     days,
     streak,
     today,
     overall: {
-      moodAvg: overall?.mood_avg ?? null,
-      energyAvg: overall?.energy_avg ?? null,
-      stressAvg: overall?.stress_avg ?? null,
-      total: overall?.total ?? 0
+      moodAvg: overall.mood_avg ?? null,
+      energyAvg: overall.energy_avg ?? null,
+      stressAvg: overall.stress_avg ?? null,
+      total: overall.total ?? 0,
     },
-    byDay: rows.map(r => ({
+    byDay: byDay.map((r: any) => ({
       dayKey: r.day_key,
       moodAvg: r.mood_avg,
       energyAvg: r.energy_avg,
       stressAvg: r.stress_avg,
-      count: r.count
-    }))
+      count: r.count,
+    })),
   };
 }
 
-/** Org-level analytics for programs (admin/manager) */
-export function orgSummary(params: { orgId: string; days?: number }) {
-  const d = getDb();
+/** Org-level analytics (admin/manager) */
+export async function orgSummary(params: { orgId: string; days?: number }) {
   const days = Math.max(7, Math.min(params.days ?? 30, 365));
   const since = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  // Daily averages across org + unique check-ins count + unique users per day
-  const byDay = d.prepare(
+  const byDay = await q<any>(
     `SELECT day_key,
-            AVG(mood) as mood_avg,
-            AVG(energy) as energy_avg,
-            AVG(stress) as stress_avg,
-            COUNT(*) as checkins,
-            COUNT(DISTINCT user_id) as users
+            AVG(mood)::float as mood_avg,
+            AVG(energy)::float as energy_avg,
+            AVG(stress)::float as stress_avg,
+            COUNT(*)::int as checkins,
+            COUNT(DISTINCT user_id)::int as users
      FROM checkins
-     WHERE org_id = ? AND day_key >= ?
+     WHERE org_id = $1 AND day_key >= $2
      GROUP BY day_key
-     ORDER BY day_key ASC`
-  ).all(params.orgId, since) as any[];
+     ORDER BY day_key ASC`,
+    [params.orgId, since],
+  );
 
-  const overall = d.prepare(
-    `SELECT AVG(mood) as mood_avg,
-            AVG(energy) as energy_avg,
-            AVG(stress) as stress_avg,
-            COUNT(*) as checkins,
-            COUNT(DISTINCT user_id) as users
+  const overallRows = await q<any>(
+    `SELECT AVG(mood)::float as mood_avg,
+            AVG(energy)::float as energy_avg,
+            AVG(stress)::float as stress_avg,
+            COUNT(*)::int as checkins,
+            COUNT(DISTINCT user_id)::int as users
      FROM checkins
-     WHERE org_id = ?`
-  ).get(params.orgId) as any;
+     WHERE org_id = $1`,
+    [params.orgId],
+  );
+  const overall = overallRows[0] || {};
 
-  // Light risk signal: users with last 7 days avg mood <= 4.5 OR avg stress >= 7.5 and at least 3 checkins
-  const riskRows = d.prepare(
+  const last7Since = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const riskRows = await q<any>(
     `SELECT user_id,
-            AVG(mood) as mood_avg,
-            AVG(stress) as stress_avg,
-            COUNT(*) as count
+            AVG(mood)::float as mood_avg,
+            AVG(stress)::float as stress_avg,
+            COUNT(*)::int as count
      FROM checkins
-     WHERE org_id = ? AND day_key >= ?
+     WHERE org_id = $1 AND day_key >= $2
      GROUP BY user_id
-     HAVING count >= 3 AND (mood_avg <= 4.5 OR stress_avg >= 7.5)
-     ORDER BY stress_avg DESC`
-  ).all(params.orgId, new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)) as any[];
+     HAVING COUNT(*) >= 3 AND (AVG(mood) <= 4.5 OR AVG(stress) >= 7.5)
+     ORDER BY AVG(stress) DESC`,
+    [params.orgId, last7Since],
+  );
 
-  // Map user ids to usernames
+  const users = await q<any>("SELECT id, username FROM users WHERE org_id = $1", [params.orgId]);
   const userMap = new Map<string, string>();
-  const users = d.prepare("SELECT id, username FROM users WHERE org_id = ?").all(params.orgId) as any[];
   for (const u of users) userMap.set(u.id, u.username);
 
   return {
     days,
     overall: {
-      moodAvg: overall?.mood_avg ?? null,
-      energyAvg: overall?.energy_avg ?? null,
-      stressAvg: overall?.stress_avg ?? null,
-      checkins: overall?.checkins ?? 0,
-      users: overall?.users ?? 0
+      moodAvg: overall.mood_avg ?? null,
+      energyAvg: overall.energy_avg ?? null,
+      stressAvg: overall.stress_avg ?? null,
+      checkins: overall.checkins ?? 0,
+      users: overall.users ?? 0,
     },
-    byDay: byDay.map(r => ({
+    byDay: byDay.map((r: any) => ({
       dayKey: r.day_key,
       moodAvg: r.mood_avg,
       energyAvg: r.energy_avg,
       stressAvg: r.stress_avg,
       checkins: r.checkins,
-      users: r.users
+      users: r.users,
     })),
-    risk: riskRows.map(r => ({
+    risk: riskRows.map((r: any) => ({
       userId: r.user_id,
       username: userMap.get(r.user_id) || r.user_id,
       moodAvg: r.mood_avg,
       stressAvg: r.stress_avg,
-      count: r.count
-    }))
+      count: r.count,
+    })),
   };
 }
 
-/** Invites (shareable links) */
-export function createInvite(params: { orgId: string; role: Role; expiresAt: string; createdBy: string }) {
-  const d = getDb();
+/** Invites */
+export async function createInvite(params: { orgId: string; role: Role; expiresAt: string; createdBy: string }) {
   const token = nanoid(32);
   const invite = {
     token,
@@ -474,16 +520,24 @@ export function createInvite(params: { orgId: string; role: Role; expiresAt: str
     role: params.role,
     expiresAt: params.expiresAt,
     createdAt: nowIso(),
-    createdBy: params.createdBy
+    createdBy: params.createdBy,
   };
-  d.prepare("INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(invite.token, invite.orgId, invite.role, invite.expiresAt, invite.createdAt, invite.createdBy);
+
+  await q("INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)", [
+    invite.token,
+    invite.orgId,
+    invite.role,
+    invite.expiresAt,
+    invite.createdAt,
+    invite.createdBy,
+  ]);
+
   return invite;
 }
 
-export function getInvite(token: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT * FROM invites WHERE token = ?").get(token) as any;
+export async function getInvite(token: string) {
+  const rows = await q<any>("SELECT * FROM invites WHERE token = $1", [token]);
+  const row = rows[0];
   if (!row) return null;
   return {
     token: row.token,
@@ -491,19 +545,20 @@ export function getInvite(token: string) {
     role: row.role as Role,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
-    createdBy: row.created_by
+    createdBy: row.created_by,
   };
 }
 
-export function deleteInvite(token: string) {
-  const d = getDb();
-  const info = d.prepare("DELETE FROM invites WHERE token = ?").run(token);
-  return info.changes > 0;
+export async function deleteInvite(token: string) {
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM invites WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [token],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
-/** Password resets (demo-friendly; token returned directly) */
-export function createPasswordReset(params: { orgId: string; userId: string; expiresAt: string; createdBy: string }) {
-  const d = getDb();
+/** Password resets */
+export async function createPasswordReset(params: { orgId: string; userId: string; expiresAt: string; createdBy: string }) {
   const token = nanoid(40);
   const reset = {
     token,
@@ -511,16 +566,20 @@ export function createPasswordReset(params: { orgId: string; userId: string; exp
     userId: params.userId,
     expiresAt: params.expiresAt,
     createdAt: nowIso(),
-    createdBy: params.createdBy
+    createdBy: params.createdBy,
   };
-  d.prepare("INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(reset.token, reset.userId, reset.orgId, reset.expiresAt, reset.createdAt, reset.createdBy);
+
+  await q(
+    "INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
+    [reset.token, reset.userId, reset.orgId, reset.expiresAt, reset.createdAt, reset.createdBy],
+  );
+
   return reset;
 }
 
-export function getPasswordReset(token: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT * FROM password_resets WHERE token = ?").get(token) as any;
+export async function getPasswordReset(token: string) {
+  const rows = await q<any>("SELECT * FROM password_resets WHERE token = $1", [token]);
+  const row = rows[0];
   if (!row) return null;
   return {
     token: row.token,
@@ -528,66 +587,82 @@ export function getPasswordReset(token: string) {
     orgId: row.org_id,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
-    createdBy: row.created_by
+    createdBy: row.created_by,
   };
 }
 
-export function deletePasswordReset(token: string) {
-  const d = getDb();
-  const info = d.prepare("DELETE FROM password_resets WHERE token = ?").run(token);
-  return info.changes > 0;
+export async function deletePasswordReset(token: string) {
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM password_resets WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [token],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
-export function setUserPassword(userId: string, password: string) {
-  const d = getDb();
+export async function setUserPassword(userId: string, password: string) {
   const passwordHash = hashPassword(password);
-  const info = d.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, userId);
-  return info.changes > 0;
+  const rows = await q<{ count: string }>(
+    "WITH upd AS (UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
+    [passwordHash, userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 /** Profiles */
-export function getUserProfile(orgId: string, userId: string) {
-  const d = getDb();
-  const row = d.prepare("SELECT * FROM user_profiles WHERE org_id = ? AND user_id = ?").get(orgId, userId) as any;
+export async function getUserProfile(orgId: string, userId: string) {
+  const rows = await q<any>("SELECT * FROM user_profiles WHERE org_id = $1 AND user_id = $2", [orgId, userId]);
+  const row = rows[0];
   if (!row) {
-    // auto-create empty profile for convenience
     const now = nowIso();
-    d.prepare("INSERT OR IGNORE INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(userId, orgId, null, null, null, "[]", now, now);
+    await q(
+      `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId, orgId, null, null, null, JSON.stringify([]), now, now],
+    );
     return { userId, orgId, fullName: null, email: null, phone: null, tagsJson: "[]", createdAt: now, updatedAt: now };
   }
+
   return {
     userId: row.user_id,
     orgId: row.org_id,
     fullName: row.full_name,
     email: row.email,
     phone: row.phone,
-    tagsJson: row.tags_json,
+    tagsJson: JSON.stringify(row.tags_json ?? []),
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
   };
 }
 
-export function upsertUserProfile(params: { orgId: string; userId: string; fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] }) {
-  const d = getDb();
-  const existing = getUserProfile(params.orgId, params.userId);
+export async function upsertUserProfile(params: {
+  orgId: string;
+  userId: string;
+  fullName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  tags?: string[];
+}) {
+  const existing = await getUserProfile(params.orgId, params.userId);
   const now = nowIso();
-  const next = {
-    fullName: (params.fullName ?? existing.fullName) ?? null,
-    email: (params.email ?? existing.email) ?? null,
-    phone: (params.phone ?? existing.phone) ?? null,
-    tagsJson: JSON.stringify(params.tags ?? JSON.parse(existing.tagsJson || "[]")),
-    updatedAt: now
-  };
-  d.prepare(
-    `UPDATE user_profiles SET full_name = ?, email = ?, phone = ?, tags_json = ?, updated_at = ? WHERE org_id = ? AND user_id = ?`
-  ).run(next.fullName, next.email, next.phone, next.tagsJson, next.updatedAt, params.orgId, params.userId);
+
+  const nextFullName = params.fullName ?? existing.fullName ?? null;
+  const nextEmail = params.email ?? existing.email ?? null;
+  const nextPhone = params.phone ?? existing.phone ?? null;
+  const nextTags = params.tags ?? JSON.parse(existing.tagsJson || "[]");
+
+  await q(
+    `UPDATE user_profiles
+     SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
+     WHERE org_id = $6 AND user_id = $7`,
+    [nextFullName, nextEmail, nextPhone, JSON.stringify(nextTags), now, params.orgId, params.userId],
+  );
+
   return getUserProfile(params.orgId, params.userId);
 }
 
-/** Notes (program staff) */
-export function addUserNote(params: { orgId: string; userId: string; authorId: string; note: string; ts?: string }) {
-  const d = getDb();
+/** Notes */
+export async function addUserNote(params: { orgId: string; userId: string; authorId: string; note: string; ts?: string }) {
   const row = {
     id: nanoid(),
     orgId: params.orgId,
@@ -595,24 +670,30 @@ export function addUserNote(params: { orgId: string; userId: string; authorId: s
     authorId: params.authorId,
     ts: params.ts || nowIso(),
     note: params.note.trim(),
-    createdAt: nowIso()
+    createdAt: nowIso(),
   };
-  d.prepare("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt);
+
+  await q(
+    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
+  );
+
   return row;
 }
 
-export function listUserNotes(params: { orgId: string; userId: string; limit?: number }) {
-  const d = getDb();
+export async function listUserNotes(params: { orgId: string; userId: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 500));
-  const rows = d.prepare("SELECT * FROM user_notes WHERE org_id = ? AND user_id = ? ORDER BY ts DESC LIMIT ?")
-    .all(params.orgId, params.userId, limit) as any[];
-  // author username lookup
+
+  const rows = await q<any>(
+    "SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3",
+    [params.orgId, params.userId, limit],
+  );
+
+  const au = await q<any>("SELECT id, username FROM users WHERE org_id = $1", [params.orgId]);
   const authors = new Map<string, string>();
-  const au = d.prepare("SELECT id, username FROM users WHERE org_id = ?").all(params.orgId) as any[];
   for (const a of au) authors.set(a.id, a.username);
 
-  return rows.map(r => ({
+  return rows.map((r) => ({
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
@@ -620,7 +701,7 @@ export function listUserNotes(params: { orgId: string; userId: string; limit?: n
     authorUsername: authors.get(r.author_id) || r.author_id,
     ts: r.ts,
     note: r.note,
-    createdAt: r.created_at
+    createdAt: r.created_at,
   }));
 }
 
@@ -633,23 +714,31 @@ function csvEscape(v: any) {
   return s;
 }
 
-export function exportCheckinsCsv(params: { orgId: string; userId?: string; sinceDayKey?: string }) {
-  const d = getDb();
-  let sql = "SELECT c.*, u.username FROM checkins c JOIN users u ON u.id = c.user_id WHERE c.org_id = ?";
+export async function exportCheckinsCsv(params: { orgId: string; userId?: string; sinceDayKey?: string }) {
+  const where: string[] = ["c.org_id = $1"];
   const args: any[] = [params.orgId];
+  let i = 2;
+
   if (params.userId) {
-    sql += " AND c.user_id = ?";
+    where.push(`c.user_id = $${i++}`);
     args.push(params.userId);
   }
   if (params.sinceDayKey) {
-    sql += " AND c.day_key >= ?";
+    where.push(`c.day_key >= $${i++}`);
     args.push(params.sinceDayKey);
   }
-  sql += " ORDER BY c.ts ASC";
-  const rows = d.prepare(sql).all(...args) as any[];
 
-  const headers = ["id","username","userId","ts","dayKey","mood","energy","stress","note","tags","createdAt"];
+  const sql = `SELECT c.*, u.username
+               FROM checkins c
+               JOIN users u ON u.id = c.user_id
+               WHERE ${where.join(" AND ")}
+               ORDER BY c.ts ASC`;
+
+  const rows = await q<any>(sql, args);
+
+  const headers = ["id", "username", "userId", "ts", "dayKey", "mood", "energy", "stress", "note", "tags", "createdAt"];
   const lines = [headers.join(",")];
+
   for (const r of rows) {
     const line = [
       r.id,
@@ -661,27 +750,31 @@ export function exportCheckinsCsv(params: { orgId: string; userId?: string; sinc
       r.energy,
       r.stress,
       r.note ?? "",
-      r.tags_json ?? "[]",
-      r.created_at
-    ].map(csvEscape).join(",");
+      JSON.stringify(r.tags_json ?? []),
+      r.created_at,
+    ]
+      .map(csvEscape)
+      .join(",");
     lines.push(line);
   }
+
   return lines.join("\n");
 }
 
-export function exportUsersCsv(params: { orgId: string }) {
-  const d = getDb();
-  const rows = d.prepare(
+export async function exportUsersCsv(params: { orgId: string }) {
+  const rows = await q<any>(
     `SELECT u.id as user_id, u.username, u.role, u.created_at,
             p.full_name, p.email, p.phone, p.tags_json, p.updated_at
      FROM users u
      LEFT JOIN user_profiles p ON p.user_id = u.id AND p.org_id = u.org_id
-     WHERE u.org_id = ?
-     ORDER BY u.created_at ASC`
-  ).all(params.orgId) as any[];
+     WHERE u.org_id = $1
+     ORDER BY u.created_at ASC`,
+    [params.orgId],
+  );
 
-  const headers = ["userId","username","role","createdAt","fullName","email","phone","profileTags","profileUpdatedAt"];
+  const headers = ["userId", "username", "role", "createdAt", "fullName", "email", "phone", "profileTags", "profileUpdatedAt"];
   const lines = [headers.join(",")];
+
   for (const r of rows) {
     const line = [
       r.user_id,
@@ -691,10 +784,13 @@ export function exportUsersCsv(params: { orgId: string }) {
       r.full_name ?? "",
       r.email ?? "",
       r.phone ?? "",
-      r.tags_json ?? "[]",
-      r.updated_at ?? ""
-    ].map(csvEscape).join(",");
+      JSON.stringify(r.tags_json ?? []),
+      r.updated_at ?? "",
+    ]
+      .map(csvEscape)
+      .join(",");
     lines.push(line);
   }
+
   return lines.join("\n");
 }
