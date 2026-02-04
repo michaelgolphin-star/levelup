@@ -118,11 +118,13 @@ export function registerRoutes(app: Express) {
     return res.json({ org });
   });
 
+  // Roster visibility (admin + manager)
   app.get("/api/users", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
     const users = await listUsers((req as any).auth!.orgId);
     return res.json({ users });
   });
 
+  // Admin-only role changes
   app.post("/api/users/role", requireAuth, requireRole(["admin"]), async (req, res) => {
     const schema = z.object({ userId: z.string().min(3), role: z.enum(["user", "manager", "admin"]) });
     const parsed = schema.safeParse(req.body);
@@ -212,7 +214,11 @@ export function registerRoutes(app: Express) {
 
     const org = await getOrg(invite.orgId);
     const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-    return res.json({ token: jwt, user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role }, org });
+    return res.json({
+      token: jwt,
+      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+      org,
+    });
   });
 
   // Auth: request password reset (demo - returns token directly)
@@ -311,7 +317,9 @@ export function registerRoutes(app: Express) {
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const limit = parsed.data.limit ? Number(parsed.data.limit) : 100;
+    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
+
     const notes = await listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
     return res.json({ notes });
   });
@@ -332,29 +340,37 @@ export function registerRoutes(app: Express) {
   });
 
   // -----------------------------
-  // Exports (CSV): staff only
+  // Exports (CSV): ADMIN ONLY ✅ (this fixes "manager can download stuff")
   // -----------------------------
-  app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const schema = z.object({ userId: z.string().optional(), sinceDays: z.string().optional() });
+  app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin"]), async (req, res) => {
+    const schema = z.object({
+      userId: z.string().optional(),
+      sinceDays: z.string().optional(),
+    });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     let sinceDayKey: string | undefined = undefined;
     if (parsed.data.sinceDays) {
-      const days = Math.max(1, Math.min(Number(parsed.data.sinceDays), 365));
+      const n = Number(parsed.data.sinceDays);
+      const days = Number.isFinite(n) ? Math.max(1, Math.min(n, 365)) : 30;
       sinceDayKey = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     }
 
-    const csv = await exportCheckinsCsv({ orgId: (req as any).auth!.orgId, userId: parsed.data.userId, sinceDayKey });
+    const csv = await exportCheckinsCsv({
+      orgId: (req as any).auth!.orgId,
+      userId: parsed.data.userId,
+      sinceDayKey,
+    });
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", "attachment; filename=\"checkins.csv\"");
+    res.setHeader("Content-Disposition", 'attachment; filename="checkins.csv"');
     return res.send(csv);
   });
 
-  app.get("/api/export/users.csv", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
+  app.get("/api/export/users.csv", requireAuth, requireRole(["admin"]), async (req, res) => {
     const csv = await exportUsersCsv({ orgId: (req as any).auth!.orgId });
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", "attachment; filename=\"users.csv\"");
+    res.setHeader("Content-Disposition", 'attachment; filename="users.csv"');
     return res.send(csv);
   });
 
@@ -389,7 +405,9 @@ export function registerRoutes(app: Express) {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
-    const limit = parsed.data.limit ? Number(parsed.data.limit) : 200;
+    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 200;
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
+
     const checkins = await listCheckIns({
       orgId: auth.orgId,
       userId: auth.userId,
@@ -454,7 +472,9 @@ export function registerRoutes(app: Express) {
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const days = parsed.data.days ? Number(parsed.data.days) : 30;
+    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+
     const summary = await orgSummary({ orgId: (req as any).auth!.orgId, days });
     return res.json({ summary });
   });
@@ -465,7 +485,9 @@ export function registerRoutes(app: Express) {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
-    const days = parsed.data.days ? Number(parsed.data.days) : 30;
+    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+
     const summary = await summaryForUser({ orgId: auth.orgId, userId: auth.userId, days });
     return res.json({ summary });
   });
