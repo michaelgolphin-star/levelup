@@ -2,22 +2,19 @@ import dotenv from "dotenv";
 import { ensureDb, createOrg, createUser, findUserByUsername } from "./storage.js";
 
 dotenv.config();
-ensureDb();
+await ensureDb();
 
-const username = (process.env.SEED_ADMIN_USERNAME || "admin").trim().toLowerCase();
-const password = process.env.SEED_ADMIN_PASSWORD || "admin123!";
-const orgName = process.env.SEED_ORG_NAME || "Demo Org";
+const orgName = process.env.SEED_ORG || "My Org";
+const username = process.env.SEED_USER || "admin";
+const password = process.env.SEED_PASS || "admin123";
 
-const existing = findUserByUsername(username);
+const existing = await findUserByUsername(username);
 if (existing) {
-  console.log("ℹ️ Seed admin already exists:", username);
+  console.log("Seed user already exists:", existing.username);
   process.exit(0);
 }
 
-const org = createOrg(orgName);
-const user = createUser({ username, password, orgId: org.id, role: "admin" });
+const org = await createOrg(orgName);
+const user = await createUser({ username, password, orgId: org.id, role: "admin" });
 
-console.log("✅ Seeded:");
-console.log("Org:", org);
-console.log("Admin username:", user.username);
-console.log("Admin password:", password);
+console.log("Seeded:", { org, user: { id: user.id, username: user.username, role: user.role } });
