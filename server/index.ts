@@ -15,7 +15,6 @@ dotenv.config();
 const PORT = Number(process.env.PORT || 8080);
 
 const app = express();
-app.set("trust proxy", 1);
 app.use(cors({ origin: true, credentials: true }));
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
@@ -31,7 +30,9 @@ app.use(
   }),
 );
 
-ensureDb();
+// Ensure DB schema exists before accepting traffic
+await ensureDb();
+
 registerRoutes(app);
 
 // --- Serve built frontend (Vite output) ---
@@ -39,7 +40,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // When compiled, we run from: server/dist/index.js
-// Frontend build is: <root>/dist
+// Frontend build is usually: <root>/dist (because vite.config.ts uses outDir: "../dist")
 const distCandidates = [
   path.resolve(__dirname, "../../dist"),
   path.resolve(process.cwd(), "dist"),
