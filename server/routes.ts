@@ -62,18 +62,18 @@ export function registerRoutes(app: Express) {
   // -----------------------------
   // Auth
   // -----------------------------
-  app.post("/api/auth/register", (req, res) => {
+  app.post("/api/auth/register", async (req, res) => {
     const parsed = RegisterSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { username, password } = parsed.data;
     const orgName = parsed.data.orgName?.trim() || "My Org";
 
-    const existing = findUserByUsername(username);
+    const existing = await findUserByUsername(username);
     if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const org = createOrg(orgName);
-    const user = createUser({ username, password, orgId: org.id, role: "admin" });
+    const org = await createOrg(orgName);
+    const user = await createUser({ username, password, orgId: org.id, role: "admin" });
 
     const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
     return res.json({
@@ -83,18 +83,18 @@ export function registerRoutes(app: Express) {
     });
   });
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     const parsed = LoginSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { username, password } = parsed.data;
-    const user = findUserByUsername(username);
+    const user = await findUserByUsername(username);
     if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
     const ok = verifyPassword(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    const org = getOrg(user.orgId);
+    const org = await getOrg(user.orgId);
     const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
     return res.json({
       token,
@@ -113,27 +113,27 @@ export function registerRoutes(app: Express) {
   // -----------------------------
   // Org + Users
   // -----------------------------
-  app.get("/api/org", requireAuth, (req, res) => {
-    const org = getOrg((req as any).auth!.orgId);
+  app.get("/api/org", requireAuth, async (req, res) => {
+    const org = await getOrg((req as any).auth!.orgId);
     return res.json({ org });
   });
 
-  app.get("/api/users", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
-    const users = listUsers((req as any).auth!.orgId);
+  app.get("/api/users", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
+    const users = await listUsers((req as any).auth!.orgId);
     return res.json({ users });
   });
 
-  app.post("/api/users/role", requireAuth, requireRole(["admin"]), (req, res) => {
+  app.post("/api/users/role", requireAuth, requireRole(["admin"]), async (req, res) => {
     const schema = z.object({ userId: z.string().min(3), role: z.enum(["user", "manager", "admin"]) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const ok = setUserRole((req as any).auth!.orgId, parsed.data.userId, parsed.data.role);
+    const ok = await setUserRole((req as any).auth!.orgId, parsed.data.userId, parsed.data.role);
     return res.json({ ok });
   });
 
   // Admin: create a user inside this org
-  app.post("/api/admin/users", requireAuth, requireRole(["admin"]), (req, res) => {
+  app.post("/api/admin/users", requireAuth, requireRole(["admin"]), async (req, res) => {
     const schema = z.object({
       username: z.string().min(3).max(40),
       password: z.string().min(6).max(200),
@@ -142,23 +142,21 @@ export function registerRoutes(app: Express) {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const existing = findUserByUsername(parsed.data.username);
+    const existing = await findUserByUsername(parsed.data.username);
     if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const user = createUser({
+    const user = await createUser({
       username: parsed.data.username,
       password: parsed.data.password,
       orgId: (req as any).auth!.orgId,
       role: parsed.data.role,
     });
 
-    return res.json({
-      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
-    });
+    return res.json({ user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role } });
   });
 
-  // Admin: create an invite link
-  app.post("/api/admin/invites", requireAuth, requireRole(["admin"]), (req, res) => {
+  // Admin: create an invite link (shareable)
+  app.post("/api/admin/invites", requireAuth, requireRole(["admin"]), async (req, res) => {
     const schema = z.object({
       role: z.enum(["user", "manager", "admin"]).default("user"),
       expiresInDays: z.number().int().min(1).max(30).default(7),
@@ -167,31 +165,29 @@ export function registerRoutes(app: Express) {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const expiresAt = new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-    const invite = createInvite({
+    const invite = await createInvite({
       orgId: (req as any).auth!.orgId,
       role: parsed.data.role,
       expiresAt,
       createdBy: (req as any).auth!.userId,
     });
-
     return res.json({ invite, urlPath: `/invite/${invite.token}` });
   });
 
   // Public: validate invite token
-  app.get("/api/invites/:token", (req, res) => {
+  app.get("/api/invites/:token", async (req, res) => {
     const token = String(req.params.token || "");
-    const invite = getInvite(token);
+    const invite = await getInvite(token);
     if (!invite) return res.status(404).json({ error: "Invite not found" });
     if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
-
-    const org = getOrg(invite.orgId);
+    const org = await getOrg(invite.orgId);
     return res.json({ invite: { token: invite.token, role: invite.role, expiresAt: invite.expiresAt }, org });
   });
 
   // Public: accept invite (creates user in that org)
-  app.post("/api/invites/:token/accept", (req, res) => {
+  app.post("/api/invites/:token/accept", async (req, res) => {
     const token = String(req.params.token || "");
-    const invite = getInvite(token);
+    const invite = await getInvite(token);
     if (!invite) return res.status(404).json({ error: "Invite not found" });
     if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
 
@@ -202,92 +198,84 @@ export function registerRoutes(app: Express) {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const existing = findUserByUsername(parsed.data.username);
+    const existing = await findUserByUsername(parsed.data.username);
     if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const user = createUser({
+    const user = await createUser({
       username: parsed.data.username,
       password: parsed.data.password,
       orgId: invite.orgId,
       role: invite.role,
     });
 
-    deleteInvite(token);
+    await deleteInvite(token);
 
-    const org = getOrg(invite.orgId);
+    const org = await getOrg(invite.orgId);
     const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-
-    return res.json({
-      token: jwt,
-      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
-      org,
-    });
+    return res.json({ token: jwt, user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role }, org });
   });
 
   // Auth: request password reset (demo - returns token directly)
-  app.post("/api/auth/request-reset", (req, res) => {
+  app.post("/api/auth/request-reset", async (req, res) => {
     const schema = z.object({ username: z.string().min(3).max(40) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const user = findUserByUsername(parsed.data.username);
+    const user = await findUserByUsername(parsed.data.username);
     if (!user) return res.status(404).json({ error: "User not found" });
 
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-    const reset = createPasswordReset({ orgId: user.orgId, userId: user.id, expiresAt, createdBy: user.id });
-
+    const reset = await createPasswordReset({ orgId: user.orgId, userId: user.id, expiresAt, createdBy: user.id });
     return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
   });
 
   // Auth: reset password using token
-  app.post("/api/auth/reset", (req, res) => {
+  app.post("/api/auth/reset", async (req, res) => {
     const schema = z.object({ token: z.string().min(10), newPassword: z.string().min(6).max(200) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const reset = getPasswordReset(parsed.data.token);
+    const reset = await getPasswordReset(parsed.data.token);
     if (!reset) return res.status(404).json({ error: "Reset token not found" });
     if (new Date(reset.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Reset token expired" });
 
-    setUserPassword(reset.userId, parsed.data.newPassword);
-    deletePasswordReset(reset.token);
-
+    await setUserPassword(reset.userId, parsed.data.newPassword);
+    await deletePasswordReset(reset.token);
     return res.json({ ok: true });
   });
 
-  // Admin: generate reset token for a user
-  app.post("/api/admin/users/:id/reset-token", requireAuth, requireRole(["admin"]), (req, res) => {
+  // Admin: generate reset token for a user (returns token directly)
+  app.post("/api/admin/users/:id/reset-token", requireAuth, requireRole(["admin"]), async (req, res) => {
     const userId = String(req.params.id || "");
     const schema = z.object({ expiresInMinutes: z.number().int().min(10).max(1440).default(60) });
     const parsed = schema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const expiresAt = new Date(Date.now() + parsed.data.expiresInMinutes * 60 * 1000).toISOString();
-    const reset = createPasswordReset({
+    const reset = await createPasswordReset({
       orgId: (req as any).auth!.orgId,
       userId,
       expiresAt,
       createdBy: (req as any).auth!.userId,
     });
-
     return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
   });
 
   // -----------------------------
   // Profiles
   // -----------------------------
-  app.get("/api/users/:id/profile", requireAuth, (req, res) => {
+  app.get("/api/users/:id/profile", requireAuth, async (req, res) => {
     const userId = String(req.params.id || "");
     const auth = (req as any).auth!;
     const isSelf = userId === auth.userId;
     const isStaff = auth.role === "admin" || auth.role === "manager";
     if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
 
-    const profile = getUserProfile(auth.orgId, userId);
+    const profile = await getUserProfile(auth.orgId, userId);
     return res.json({ profile });
   });
 
-  app.put("/api/users/:id/profile", requireAuth, (req, res) => {
+  app.put("/api/users/:id/profile", requireAuth, async (req, res) => {
     const userId = String(req.params.id || "");
     const auth = (req as any).auth!;
     const isSelf = userId === auth.userId;
@@ -303,53 +291,50 @@ export function registerRoutes(app: Express) {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const profile = upsertUserProfile({
+    const profile = await upsertUserProfile({
       orgId: auth.orgId,
       userId,
-      fullName: parsed.data.fullName ?? undefined,
-      email: parsed.data.email ?? undefined,
-      phone: parsed.data.phone ?? undefined,
-      tags: parsed.data.tags ?? undefined,
+      fullName: parsed.data.fullName,
+      email: parsed.data.email,
+      phone: parsed.data.phone,
+      tags: parsed.data.tags,
     });
-
     return res.json({ profile });
   });
 
   // -----------------------------
   // Notes (staff only)
   // -----------------------------
-  app.get("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
+  app.get("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
     const userId = String(req.params.id || "");
     const schema = z.object({ limit: z.string().optional() });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const limit = parsed.data.limit ? Number(parsed.data.limit) : 100;
-    const notes = listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
-
+    const notes = await listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
     return res.json({ notes });
   });
 
-  app.post("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
+  app.post("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
     const userId = String(req.params.id || "");
     const schema = z.object({ note: z.string().min(1).max(2000) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const n = addUserNote({
+    const n = await addUserNote({
       orgId: (req as any).auth!.orgId,
       userId,
       authorId: (req as any).auth!.userId,
       note: parsed.data.note,
     });
-
     return res.json({ note: n });
   });
 
   // -----------------------------
   // Exports (CSV): staff only
   // -----------------------------
-  app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
+  app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
     const schema = z.object({ userId: z.string().optional(), sinceDays: z.string().optional() });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -360,33 +345,28 @@ export function registerRoutes(app: Express) {
       sinceDayKey = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     }
 
-    const csv = exportCheckinsCsv({
-      orgId: (req as any).auth!.orgId,
-      userId: parsed.data.userId,
-      sinceDayKey,
-    });
-
+    const csv = await exportCheckinsCsv({ orgId: (req as any).auth!.orgId, userId: parsed.data.userId, sinceDayKey });
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="checkins.csv"');
+    res.setHeader("Content-Disposition", "attachment; filename=\"checkins.csv\"");
     return res.send(csv);
   });
 
-  app.get("/api/export/users.csv", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
-    const csv = exportUsersCsv({ orgId: (req as any).auth!.orgId });
+  app.get("/api/export/users.csv", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
+    const csv = await exportUsersCsv({ orgId: (req as any).auth!.orgId });
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="users.csv"');
+    res.setHeader("Content-Disposition", "attachment; filename=\"users.csv\"");
     return res.send(csv);
   });
 
   // -----------------------------
   // Check-ins
   // -----------------------------
-  app.post("/api/checkins", requireAuth, (req, res) => {
+  app.post("/api/checkins", requireAuth, async (req, res) => {
     const parsed = CheckInSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
-    const checkin = createCheckIn({
+    const checkin = await createCheckIn({
       orgId: auth.orgId,
       userId: auth.userId,
       ts: parsed.data.ts,
@@ -400,7 +380,7 @@ export function registerRoutes(app: Express) {
     return res.json({ checkin });
   });
 
-  app.get("/api/checkins", requireAuth, (req, res) => {
+  app.get("/api/checkins", requireAuth, async (req, res) => {
     const schema = z.object({
       dayKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       limit: z.string().optional(),
@@ -410,32 +390,31 @@ export function registerRoutes(app: Express) {
 
     const auth = (req as any).auth!;
     const limit = parsed.data.limit ? Number(parsed.data.limit) : 200;
-    const checkins = listCheckIns({
+    const checkins = await listCheckIns({
       orgId: auth.orgId,
       userId: auth.userId,
       dayKey: parsed.data.dayKey,
       limit,
     });
-
     return res.json({ checkins });
   });
 
-  app.delete("/api/checkins/:id", requireAuth, (req, res) => {
+  app.delete("/api/checkins/:id", requireAuth, async (req, res) => {
     const id = String(req.params.id || "");
     const auth = (req as any).auth!;
-    const ok = deleteCheckIn(auth.orgId, auth.userId, id);
+    const ok = await deleteCheckIn(auth.orgId, auth.userId, id);
     return res.json({ ok });
   });
 
   // -----------------------------
   // Habits
   // -----------------------------
-  app.post("/api/habits", requireAuth, (req, res) => {
+  app.post("/api/habits", requireAuth, async (req, res) => {
     const parsed = HabitSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
-    const habit = createHabit({
+    const habit = await createHabit({
       orgId: auth.orgId,
       userId: auth.userId,
       name: parsed.data.name,
@@ -445,13 +424,13 @@ export function registerRoutes(app: Express) {
     return res.json({ habit });
   });
 
-  app.get("/api/habits", requireAuth, (req, res) => {
+  app.get("/api/habits", requireAuth, async (req, res) => {
     const schema = z.object({ includeArchived: z.string().optional() });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
-    const habits = listHabits({
+    const habits = await listHabits({
       orgId: auth.orgId,
       userId: auth.userId,
       includeArchived: parsed.data.includeArchived === "1",
@@ -460,34 +439,34 @@ export function registerRoutes(app: Express) {
     return res.json({ habits });
   });
 
-  app.post("/api/habits/:id/archive", requireAuth, (req, res) => {
+  app.post("/api/habits/:id/archive", requireAuth, async (req, res) => {
     const id = String(req.params.id || "");
     const auth = (req as any).auth!;
-    const ok = archiveHabit(auth.orgId, auth.userId, id);
+    const ok = await archiveHabit(auth.orgId, auth.userId, id);
     return res.json({ ok });
   });
 
   // -----------------------------
   // Analytics
   // -----------------------------
-  app.get("/api/analytics/org-summary", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
+  app.get("/api/analytics/org-summary", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
     const schema = z.object({ days: z.string().optional() });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const days = parsed.data.days ? Number(parsed.data.days) : 30;
-    const summary = orgSummary({ orgId: (req as any).auth!.orgId, days });
+    const summary = await orgSummary({ orgId: (req as any).auth!.orgId, days });
     return res.json({ summary });
   });
 
-  app.get("/api/analytics/summary", requireAuth, (req, res) => {
+  app.get("/api/analytics/summary", requireAuth, async (req, res) => {
     const schema = z.object({ days: z.string().optional() });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const auth = (req as any).auth!;
     const days = parsed.data.days ? Number(parsed.data.days) : 30;
-    const summary = summaryForUser({ orgId: auth.orgId, userId: auth.userId, days });
+    const summary = await summaryForUser({ orgId: auth.orgId, userId: auth.userId, days });
     return res.json({ summary });
   });
 }
