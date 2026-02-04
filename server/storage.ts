@@ -1,3 +1,4 @@
+console.log("🟢 ensureDb() FILE LOADED");
 import Database from "better-sqlite3";
 import path from "path";
 import { nanoid } from "nanoid";
@@ -17,6 +18,9 @@ export function getDb() {
 }
 
 export function ensureDb() {
+  export async function ensureDb() {
+  console.log("🟢 ensureDb() FUNCTION CALLED");
+  // existing code below;
   const d = getDb();
   d.exec(`
     CREATE TABLE IF NOT EXISTS orgs (
