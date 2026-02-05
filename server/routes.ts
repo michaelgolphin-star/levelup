@@ -28,8 +28,46 @@ import {
   listUserNotes,
   exportCheckinsCsv,
   exportUsersCsv,
+
+  // Outlet / grievance
+  createOutletSession,
+  getOutletSession,
+  listOutletSessionsForUser,
+  listOutletSessionsForStaff,
+  listOutletMessages,
+  addOutletMessage,
+  escalateOutletSession,
+  closeOutletSession,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
+
+/**
+ * NOTE: AI is stubbed here on purpose.
+ * Phase 2 Step 2 goal is to wire the workflow without forcing OpenAI integration yet.
+ * Later you can replace `generateOutletAiReply()` with a real provider.
+ */
+async function generateOutletAiReply(params: {
+  userMessage: string;
+  category?: string | null;
+  visibility?: string;
+}): Promise<{ reply: string; riskLevel: number }> {
+  const msg = params.userMessage.trim();
+
+  // ultra-light “risk heuristic” (NOT diagnosis)
+  const lowered = msg.toLowerCase();
+  const riskKeywords = ["suicide", "kill myself", "self harm", "hurt myself", "gun", "shoot", "homicide", "kill them"];
+  const riskLevel = riskKeywords.some((k) => lowered.includes(k)) ? 2 : 0;
+
+  const reply =
+    "I hear you. Thanks for sharing this.\n\n" +
+    "A few quick questions to help you sort this out:\n" +
+    "1) What happened (facts) and what impact did it have on you?\n" +
+    "2) What would a reasonable outcome look like (schedule change, clarification, mediation, time off, boundaries, etc.)?\n" +
+    "3) Is this urgent or safety-related?\n\n" +
+    "If you want, I can help you: (a) write a clear message to your manager/HR, (b) document the situation, and (c) pick the best next step.";
+
+  return { reply, riskLevel };
+}
 
 const RegisterSchema = z.object({
   orgName: z.string().min(2).max(80).optional(),
@@ -54,6 +92,22 @@ const CheckInSchema = z.object({
 const HabitSchema = z.object({
   name: z.string().min(1).max(80),
   targetPerWeek: z.number().int().min(1).max(14),
+});
+
+/** Outlet (grievance outlet) schemas */
+const OutletCreateSchema = z.object({
+  category: z.string().max(80).optional().nullable(),
+  visibility: z.enum(["private", "manager", "admin"]).default("private"),
+});
+
+const OutletMessageSchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+
+const OutletEscalateSchema = z.object({
+  escalatedToRole: z.enum(["manager", "admin"]),
+  assignedToUserId: z.string().min(3).optional().nullable(),
+  reason: z.string().max(500).optional().nullable(),
 });
 
 export function registerRoutes(app: Express) {
@@ -340,7 +394,177 @@ export function registerRoutes(app: Express) {
   });
 
   // -----------------------------
-  // Exports (CSV): ADMIN ONLY ✅ (this fixes "manager can download stuff")
+  // Outlet / Grievance Office ✅
+  // -----------------------------
+
+  // Employee: create a new outlet session
+  app.post("/api/outlet/sessions", requireAuth, async (req, res) => {
+    const parsed = OutletCreateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const auth = (req as any).auth!;
+    const session = await createOutletSession({
+      orgId: auth.orgId,
+      userId: auth.userId,
+      category: parsed.data.category ?? null,
+      visibility: parsed.data.visibility,
+      riskLevel: 0,
+    });
+
+    return res.json({ session });
+  });
+
+  // Employee: list my outlet sessions
+  app.get("/api/outlet/sessions", requireAuth, async (req, res) => {
+    const schema = z.object({ limit: z.string().optional() });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const auth = (req as any).auth!;
+    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
+
+    // staff can request staff view via ?view=staff
+    const view = String((req.query as any).view || "");
+    if (view === "staff" && (auth.role === "admin" || auth.role === "manager")) {
+      const sessions = await listOutletSessionsForStaff({
+        orgId: auth.orgId,
+        role: auth.role,
+        staffUserId: auth.userId,
+        limit: Math.max(limit, 100),
+      });
+      return res.json({ sessions });
+    }
+
+    const sessions = await listOutletSessionsForUser({ orgId: auth.orgId, userId: auth.userId, limit });
+    return res.json({ sessions });
+  });
+
+  // Get a session + messages (RBAC enforced)
+  app.get("/api/outlet/sessions/:id", requireAuth, async (req, res) => {
+    const sessionId = String(req.params.id || "");
+    const auth = (req as any).auth!;
+
+    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    const isOwner = session.userId === auth.userId;
+    const isStaff = auth.role === "admin" || auth.role === "manager";
+
+    // Visibility rules:
+    // - owner always allowed
+    // - staff allowed if visibility permits OR it’s escalated for them (storage function handles in list view, but here we keep it simple)
+    if (!isOwner) {
+      if (!isStaff) return res.status(403).json({ error: "Forbidden" });
+
+      const vis = String(session.visibility || "private");
+      const staffAllowed =
+        vis === "manager" ||
+        (vis === "admin" && auth.role === "admin");
+
+      if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const messages = await listOutletMessages({ orgId: auth.orgId, sessionId });
+    return res.json({ session, messages });
+  });
+
+  // Post a user message -> store -> generate AI reply -> store (owner only)
+  app.post("/api/outlet/sessions/:id/messages", requireAuth, async (req, res) => {
+    const sessionId = String(req.params.id || "");
+    const parsed = OutletMessageSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const auth = (req as any).auth!;
+    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (session.userId !== auth.userId) return res.status(403).json({ error: "Forbidden" });
+
+    const userMsg = await addOutletMessage({
+      orgId: auth.orgId,
+      sessionId,
+      sender: "user",
+      content: parsed.data.content,
+    });
+
+    const ai = await generateOutletAiReply({
+      userMessage: parsed.data.content,
+      category: session.category ?? null,
+      visibility: session.visibility,
+    });
+
+    const aiMsg = await addOutletMessage({
+      orgId: auth.orgId,
+      sessionId,
+      sender: "ai",
+      content: ai.reply,
+    });
+
+    // If risk triggers, force visibility to admin via escalation (MVP behavior)
+    if (ai.riskLevel >= 2) {
+      await escalateOutletSession({
+        orgId: auth.orgId,
+        sessionId,
+        escalatedToRole: "admin",
+        assignedToUserId: null,
+        reason: "Auto-flag: safety/risk keywords detected.",
+      });
+    }
+
+    return res.json({ userMessage: userMsg, aiMessage: aiMsg, riskLevel: ai.riskLevel });
+  });
+
+  // Staff: escalate a session (manager/admin) — also allowed for owner if you want “please escalate”
+  app.post("/api/outlet/sessions/:id/escalate", requireAuth, async (req, res) => {
+    const sessionId = String(req.params.id || "");
+    const parsed = OutletEscalateSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const auth = (req as any).auth!;
+    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    const isOwner = session.userId === auth.userId;
+    const isStaff = auth.role === "admin" || auth.role === "manager";
+
+    // owner can request escalation upward (manager/admin). staff can escalate as well.
+    if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
+
+    // manager cannot escalate-to-admin? They can, but only admin can assign-to-user maybe later.
+    if (auth.role === "manager" && parsed.data.escalatedToRole === "admin") {
+      // allowed in MVP; change here if you want managers blocked from escalating to admin.
+    }
+
+    const esc = await escalateOutletSession({
+      orgId: auth.orgId,
+      sessionId,
+      escalatedToRole: parsed.data.escalatedToRole,
+      assignedToUserId: parsed.data.assignedToUserId ?? null,
+      reason: parsed.data.reason ?? null,
+    });
+
+    return res.json({ escalation: esc });
+  });
+
+  // Close a session (owner or staff)
+  app.post("/api/outlet/sessions/:id/close", requireAuth, async (req, res) => {
+    const sessionId = String(req.params.id || "");
+    const auth = (req as any).auth!;
+
+    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    const isOwner = session.userId === auth.userId;
+    const isStaff = auth.role === "admin" || auth.role === "manager";
+    if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
+
+    const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
+    return res.json({ ok: !!ok });
+  });
+
+  // -----------------------------
+  // Exports (CSV): ADMIN ONLY ✅
   // -----------------------------
   app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin"]), async (req, res) => {
     const schema = z.object({
