@@ -21,8 +21,7 @@ if (!DATABASE_URL) {
 // - if PGSSLMODE=require or the URL includes ?sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
-  DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -49,6 +48,25 @@ function normalizeUsername(username: string) {
 function toInt(v: any, fallback: number) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Outlet / grievance sessions */
+export type OutletVisibility = "private" | "manager" | "admin";
+export type OutletStatus = "open" | "escalated" | "closed";
+export type OutletSender = "user" | "ai";
+
+function normalizeVisibility(v: any): OutletVisibility {
+  const s = String(v || "").toLowerCase();
+  if (s === "manager") return "manager";
+  if (s === "admin") return "admin";
+  return "private";
+}
+
+function normalizeStatus(v: any): OutletStatus {
+  const s = String(v || "").toLowerCase();
+  if (s === "escalated") return "escalated";
+  if (s === "closed") return "closed";
+  return "open";
 }
 
 export async function ensureDb() {
@@ -131,6 +149,53 @@ export async function ensureDb() {
       note TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS outlet_sessions (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+      -- employee-chosen visibility
+      -- private: only employee (and AI) sees it
+      -- manager: manager/admin can see it
+      -- admin: admin can see it
+      visibility TEXT NOT NULL DEFAULT 'private',
+
+      -- broad category tag (burnout, scheduling, conflict, pay, safety, etc.)
+      category TEXT,
+
+      -- workflow
+      status TEXT NOT NULL DEFAULT 'open', -- open | escalated | closed
+      risk_level INTEGER NOT NULL DEFAULT 0, -- 0=normal, higher=more urgent routing
+
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS outlet_messages (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES outlet_sessions(id) ON DELETE CASCADE,
+
+      -- sender: 'user' or 'ai'
+      sender TEXT NOT NULL,
+      content TEXT NOT NULL,
+
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS outlet_escalations (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES outlet_sessions(id) ON DELETE CASCADE,
+
+      -- who it is escalated to
+      escalated_to_role TEXT NOT NULL, -- manager | admin
+      assigned_to_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+
+      reason TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Indexes
@@ -147,25 +212,28 @@ export async function ensureDb() {
     CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id);
 
     CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts);
+
+    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility);
+
+    CREATE INDEX IF NOT EXISTS idx_outlet_messages_session_created ON outlet_messages(session_id, created_at ASC);
+
+    CREATE INDEX IF NOT EXISTS idx_outlet_escalations_session ON outlet_escalations(session_id, created_at DESC);
   `);
 }
 
 /** Orgs */
 export async function createOrg(name: string) {
   const org = { id: nanoid(), name: name.trim(), createdAt: nowIso() };
-  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [
-    org.id,
-    org.name,
-    org.createdAt,
-  ]);
+  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [org.id, org.name, org.createdAt]);
   return org;
 }
 
 export async function getOrg(orgId: string) {
-  const rows = await q<{ id: string; name: string; created_at: string }>(
-    "SELECT id, name, created_at FROM orgs WHERE id = $1",
-    [orgId],
-  );
+  const rows = await q<{ id: string; name: string; created_at: string }>("SELECT id, name, created_at FROM orgs WHERE id = $1", [
+    orgId,
+  ]);
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, name: row.name, createdAt: row.created_at };
@@ -220,10 +288,9 @@ export async function getUserById(userId: string) {
 }
 
 export async function listUsers(orgId: string) {
-  const rows = await q<any>(
-    "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
-    [orgId],
-  );
+  const rows = await q<any>("SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC", [
+    orgId,
+  ]);
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
@@ -354,9 +421,7 @@ export async function createHabit(params: { orgId: string; userId: string; name:
 
 export async function listHabits(params: { orgId: string; userId: string; includeArchived?: boolean }) {
   const includeArchived = !!params.includeArchived;
-  const sql = `SELECT * FROM habits WHERE org_id = $1 AND user_id = $2 ${
-    includeArchived ? "" : "AND archived_at IS NULL"
-  } ORDER BY created_at DESC`;
+  const sql = `SELECT * FROM habits WHERE org_id = $1 AND user_id = $2 ${includeArchived ? "" : "AND archived_at IS NULL"} ORDER BY created_at DESC`;
   const rows = await q<any>(sql, [params.orgId, params.userId]);
   return rows.map((r) => ({
     id: r.id,
@@ -550,10 +615,9 @@ export async function getInvite(token: string) {
 }
 
 export async function deleteInvite(token: string) {
-  const rows = await q<{ count: string }>(
-    "WITH del AS (DELETE FROM invites WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
-    [token],
-  );
+  const rows = await q<{ count: string }>("WITH del AS (DELETE FROM invites WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del", [
+    token,
+  ]);
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
@@ -569,10 +633,14 @@ export async function createPasswordReset(params: { orgId: string; userId: strin
     createdBy: params.createdBy,
   };
 
-  await q(
-    "INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
-    [reset.token, reset.userId, reset.orgId, reset.expiresAt, reset.createdAt, reset.createdBy],
-  );
+  await q("INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)", [
+    reset.token,
+    reset.userId,
+    reset.orgId,
+    reset.expiresAt,
+    reset.createdAt,
+    reset.createdBy,
+  ]);
 
   return reset;
 }
@@ -592,19 +660,18 @@ export async function getPasswordReset(token: string) {
 }
 
 export async function deletePasswordReset(token: string) {
-  const rows = await q<{ count: string }>(
-    "WITH del AS (DELETE FROM password_resets WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
-    [token],
-  );
+  const rows = await q<{ count: string }>("WITH del AS (DELETE FROM password_resets WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del", [
+    token,
+  ]);
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
 export async function setUserPassword(userId: string, password: string) {
   const passwordHash = hashPassword(password);
-  const rows = await q<{ count: string }>(
-    "WITH upd AS (UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
-    [passwordHash, userId],
-  );
+  const rows = await q<{ count: string }>("WITH upd AS (UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING 1) SELECT COUNT(*)::text as count FROM upd", [
+    passwordHash,
+    userId,
+  ]);
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
@@ -673,10 +740,15 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q(
-    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
-  );
+  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
+    row.id,
+    row.orgId,
+    row.userId,
+    row.authorId,
+    row.ts,
+    row.note,
+    row.createdAt,
+  ]);
 
   return row;
 }
@@ -684,10 +756,11 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
 export async function listUserNotes(params: { orgId: string; userId: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 500));
 
-  const rows = await q<any>(
-    "SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3",
-    [params.orgId, params.userId, limit],
-  );
+  const rows = await q<any>("SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3", [
+    params.orgId,
+    params.userId,
+    limit,
+  ]);
 
   const au = await q<any>("SELECT id, username FROM users WHERE org_id = $1", [params.orgId]);
   const authors = new Map<string, string>();
@@ -703,6 +776,215 @@ export async function listUserNotes(params: { orgId: string; userId: string; lim
     note: r.note,
     createdAt: r.created_at,
   }));
+}
+
+/** Outlet / grievance storage functions */
+export async function createOutletSession(params: {
+  orgId: string;
+  userId: string;
+  category?: string | null;
+  visibility?: OutletVisibility;
+  riskLevel?: number;
+}) {
+  const now = nowIso();
+  const row = {
+    id: nanoid(),
+    orgId: params.orgId,
+    userId: params.userId,
+    visibility: (params.visibility ?? "private") as OutletVisibility,
+    category: (params.category ?? null)?.trim?.() ?? params.category ?? null,
+    status: "open" as OutletStatus,
+    riskLevel: toInt(params.riskLevel, 0),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await q(
+    `INSERT INTO outlet_sessions (id, org_id, user_id, visibility, category, status, risk_level, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [row.id, row.orgId, row.userId, row.visibility, row.category, row.status, row.riskLevel, row.createdAt, row.updatedAt],
+  );
+
+  return row;
+}
+
+export async function getOutletSession(params: { orgId: string; sessionId: string }) {
+  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [params.orgId, params.sessionId]);
+  const r = rows[0];
+  if (!r) return null;
+
+  return {
+    id: r.id,
+    orgId: r.org_id,
+    userId: r.user_id,
+    visibility: normalizeVisibility(r.visibility),
+    category: r.category ?? null,
+    status: normalizeStatus(r.status),
+    riskLevel: r.risk_level ?? 0,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function listOutletSessionsForUser(params: { orgId: string; userId: string; limit?: number }) {
+  const limit = Math.max(1, Math.min(params.limit ?? 50, 200));
+  const rows = await q<any>(
+    `SELECT * FROM outlet_sessions
+     WHERE org_id = $1 AND user_id = $2
+     ORDER BY updated_at DESC
+     LIMIT $3`,
+    [params.orgId, params.userId, limit],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    orgId: r.org_id,
+    userId: r.user_id,
+    visibility: normalizeVisibility(r.visibility),
+    category: r.category ?? null,
+    status: normalizeStatus(r.status),
+    riskLevel: r.risk_level ?? 0,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+/**
+ * List sessions visible to a manager/admin.
+ * - admin: sees visibility in ('admin','manager') + anything escalated to admin
+ * - manager: sees visibility='manager' + anything escalated to manager (and optionally assigned to them)
+ */
+export async function listOutletSessionsForStaff(params: {
+  orgId: string;
+  role: Role; // "manager" | "admin" (we'll ignore "user")
+  staffUserId?: string;
+  limit?: number;
+}) {
+  const limit = Math.max(1, Math.min(params.limit ?? 100, 300));
+  if (params.role !== "manager" && params.role !== "admin") return [];
+
+  const visibilityClause = params.role === "admin" ? `(s.visibility = 'admin' OR s.visibility = 'manager')` : `(s.visibility = 'manager')`;
+
+  const escRole = params.role;
+  const escWhere: string[] = [`e.org_id = $1`, `e.escalated_to_role = $2`];
+  const escArgs: any[] = [params.orgId, escRole];
+  let i = 3;
+
+  if (params.staffUserId) {
+    escWhere.push(`(e.assigned_to_user_id IS NULL OR e.assigned_to_user_id = $${i++})`);
+    escArgs.push(params.staffUserId);
+  }
+
+  const rows = await q<any>(
+    `
+    SELECT s.*
+    FROM outlet_sessions s
+    WHERE s.org_id = $1
+      AND (
+        ${visibilityClause}
+        OR s.id IN (
+          SELECT e.session_id
+          FROM outlet_escalations e
+          WHERE ${escWhere.join(" AND ")}
+        )
+      )
+    ORDER BY s.updated_at DESC
+    LIMIT $${i}
+    `,
+    [...escArgs, limit],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    orgId: r.org_id,
+    userId: r.user_id,
+    visibility: normalizeVisibility(r.visibility),
+    category: r.category ?? null,
+    status: normalizeStatus(r.status),
+    riskLevel: r.risk_level ?? 0,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+export async function listOutletMessages(params: { orgId: string; sessionId: string }) {
+  const rows = await q<any>(
+    `SELECT * FROM outlet_messages
+     WHERE org_id = $1 AND session_id = $2
+     ORDER BY created_at ASC`,
+    [params.orgId, params.sessionId],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    orgId: r.org_id,
+    sessionId: r.session_id,
+    sender: (r.sender === "ai" ? "ai" : "user") as OutletSender,
+    content: r.content,
+    createdAt: r.created_at,
+  }));
+}
+
+export async function addOutletMessage(params: { orgId: string; sessionId: string; sender: OutletSender; content: string }) {
+  const msg = {
+    id: nanoid(),
+    orgId: params.orgId,
+    sessionId: params.sessionId,
+    sender: params.sender,
+    content: params.content.trim(),
+    createdAt: nowIso(),
+  };
+
+  await q(`INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [
+    msg.id,
+    msg.orgId,
+    msg.sessionId,
+    msg.sender,
+    msg.content,
+    msg.createdAt,
+  ]);
+
+  await q(`UPDATE outlet_sessions SET updated_at = $1 WHERE org_id = $2 AND id = $3`, [msg.createdAt, msg.orgId, msg.sessionId]);
+
+  return msg;
+}
+
+export async function escalateOutletSession(params: {
+  orgId: string;
+  sessionId: string;
+  escalatedToRole: "manager" | "admin";
+  assignedToUserId?: string | null;
+  reason?: string | null;
+}) {
+  const now = nowIso();
+  const esc = {
+    id: nanoid(),
+    orgId: params.orgId,
+    sessionId: params.sessionId,
+    escalatedToRole: params.escalatedToRole,
+    assignedToUserId: params.assignedToUserId ?? null,
+    reason: (params.reason ?? null)?.trim?.() ?? params.reason ?? null,
+    createdAt: now,
+  };
+
+  await q(
+    `INSERT INTO outlet_escalations (id, org_id, session_id, escalated_to_role, assigned_to_user_id, reason, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [esc.id, esc.orgId, esc.sessionId, esc.escalatedToRole, esc.assignedToUserId, esc.reason, esc.createdAt],
+  );
+
+  await q(`UPDATE outlet_sessions SET status = 'escalated', updated_at = $1 WHERE org_id = $2 AND id = $3`, [now, params.orgId, params.sessionId]);
+
+  return esc;
+}
+
+export async function closeOutletSession(params: { orgId: string; sessionId: string }) {
+  const now = nowIso();
+  const rows = await q<{ count: string }>(
+    "WITH upd AS (UPDATE outlet_sessions SET status = 'closed', updated_at = $1 WHERE org_id = $2 AND id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
+    [now, params.orgId, params.sessionId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 /** Export helpers */
