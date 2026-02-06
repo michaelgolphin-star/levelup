@@ -1,3 +1,5 @@
+// client/src/ui/AuthPage.tsx (FULL REPLACEMENT)
+
 import React from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, setToken } from "../lib/api";
@@ -19,10 +21,11 @@ export default function AuthPage({ mode }: { mode: "login" | "register" }) {
         mode === "register"
           ? await api.register(orgName, username, password)
           : await api.login(username, password);
+
       setToken(resp.token);
       nav("/dashboard");
     } catch (e: any) {
-      setErr(e.message || "Failed");
+      setErr(e?.message || "Failed");
     } finally {
       setLoading(false);
     }
@@ -42,24 +45,44 @@ export default function AuthPage({ mode }: { mode: "login" | "register" }) {
           </div>
           <span className="badge">{mode === "register" ? "Admin setup" : "Access"}</span>
         </div>
+
         <div className="body">
           <form onSubmit={submit} className="row" style={{ alignItems: "flex-end" }}>
             {mode === "register" && (
               <div className="col">
                 <div className="label">Program / Organization name</div>
-                <input className="input" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
+                <input
+                  className="input"
+                  value={orgName}
+                  onChange={(e) => setOrgName(e.target.value)}
+                />
               </div>
             )}
+
             <div className="col">
               <div className="label">Username</div>
-              <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" />
+              <input
+                className="input"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
             </div>
+
             <div className="col">
               <div className="label">Password</div>
-              <input className="input" value={password} onChange={(e) => setPassword(e.target.value)} type="password" />
+              <input
+                className="input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+              />
             </div>
+
             <div className="col" style={{ flexBasis: 180 }}>
-              <button className="btn primary" disabled={loading}>
+              <button className="btn primary" disabled={loading || !username.trim() || !password}>
                 {loading ? "Working..." : mode === "register" ? "Create space" : "Log in"}
               </button>
             </div>
@@ -73,6 +96,7 @@ export default function AuthPage({ mode }: { mode: "login" | "register" }) {
           )}
 
           <hr />
+
           <div className="small">
             {mode === "register" ? (
               <>
@@ -84,6 +108,7 @@ export default function AuthPage({ mode }: { mode: "login" | "register" }) {
               </>
             )}
           </div>
+
           <div className="small" style={{ marginTop: 10 }}>
             Forgot password? <Link to="/reset">Reset it</Link>
           </div>
