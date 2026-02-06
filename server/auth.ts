@@ -1,3 +1,4 @@
+// server/auth.ts (FULL REPLACEMENT)
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { timingSafeEqual } from "crypto";
@@ -11,7 +12,6 @@ export function hashPassword(password: string) {
 }
 
 export function verifyPassword(password: string, hash: string) {
-  // bcrypt handles constant-time checks internally
   return bcrypt.compareSync(password, hash);
 }
 
@@ -23,20 +23,42 @@ export type AuthedRequest = Request & {
   auth?: { userId: string; orgId: string; role: Role };
 };
 
+function readBearerToken(req: Request): string | null {
+  const header = String(req.headers.authorization || "").trim();
+  if (!header) return null;
+
+  // tolerate extra spaces + casing
+  const parts = header.split(/\s+/);
+  if (parts.length < 2) return null;
+
+  const kind = parts[0];
+  const token = parts.slice(1).join(" ").trim(); // just in case, though JWT won’t contain spaces
+  if (!/^bearer$/i.test(kind) || !token) return null;
+
+  return token;
+}
+
 export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
-  const header = req.headers.authorization || "";
-  const [kind, token] = header.split(" ");
-  if (kind !== "Bearer" || !token) return res.status(401).json({ error: "Missing bearer token" });
+  const token = readBearerToken(req);
+  if (!token) return res.status(401).json({ error: "Missing bearer token" });
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
-    if (!decoded?.userId || !decoded?.orgId || !decoded?.role) {
-      return res.status(401).json({ error: "Invalid token" });
+
+    const userId = decoded?.userId;
+    const orgId = decoded?.orgId;
+    const role = decoded?.role;
+
+    if (!userId || !orgId || !role) {
+      return res.status(401).json({ error: "Invalid token payload" });
     }
-    req.auth = { userId: decoded.userId, orgId: decoded.orgId, role: decoded.role };
+
+    req.auth = { userId, orgId, role };
     return next();
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
+  } catch (err: any) {
+    const name = err?.name || "JWTError";
+    // Common: JsonWebTokenError, TokenExpiredError
+    return res.status(401).json({ error: `Invalid token (${name})` });
   }
 }
 
