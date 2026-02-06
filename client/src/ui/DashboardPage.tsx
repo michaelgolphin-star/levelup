@@ -46,6 +46,16 @@ type Habit = {
   archivedAt?: string | null;
 };
 
+type UserSummary = {
+  days: number;
+  streak: number;
+  overall: {
+    moodAvg?: number | null;
+    energyAvg?: number | null;
+    stressAvg?: number | null;
+  };
+};
+
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
@@ -101,27 +111,34 @@ async function downloadCsv(path: string, filename: string) {
   URL.revokeObjectURL(dlUrl);
 }
 
-function badgeClass(kind: "good" | "warn" | "bad") {
-  if (kind === "bad") return "badge bad";
-  if (kind === "warn") return "badge warn";
-  return "badge good";
+function fmt1(n?: number | null) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  return (Math.round(Number(n) * 10) / 10).toFixed(1);
 }
 
-function kpiKind(value: number, which: "mood" | "stress" | "energy") {
-  // quick visual heuristics
-  if (which === "mood") {
-    if (value <= 4) return "bad";
-    if (value <= 6) return "warn";
-    return "good";
-  }
+function dayKeyFromDate(d: Date) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function addDays(d: Date, days: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + days);
+  return x;
+}
+
+function badgeTone(which: "mood" | "energy" | "stress", v: number) {
+  // simple UI heuristic (not “judgment”)
   if (which === "stress") {
-    if (value >= 8) return "bad";
-    if (value >= 6) return "warn";
+    if (v >= 8) return "bad";
+    if (v >= 6) return "warn";
     return "good";
   }
-  // energy
-  if (value <= 4) return "bad";
-  if (value <= 6) return "warn";
+  // mood/energy
+  if (v <= 4) return "bad";
+  if (v <= 6) return "warn";
   return "good";
 }
 
@@ -137,6 +154,8 @@ export default function DashboardPage() {
 
   const [checkins, setCheckins] = useState<CheckIn[]>([]);
   const [habits, setHabits] = useState<Habit[]>([]);
+  const [summary, setSummary] = useState<UserSummary | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,9 +194,16 @@ export default function DashboardPage() {
     try {
       setLoading(true);
       setError(null);
-      const [c, h] = await Promise.all([api.listCheckins(200), api.listHabits(false)]);
+
+      const [c, h, s] = await Promise.all([
+        api.listCheckins(500),
+        api.listHabits(false),
+        api.summary(30),
+      ]);
+
       setCheckins((c.checkins || []) as any);
       setHabits((h.habits || []) as any);
+      setSummary((s.summary || null) as any);
     } catch (e: any) {
       setError(e?.message || "Failed to load dashboard data.");
     } finally {
@@ -293,6 +319,48 @@ export default function DashboardPage() {
     setTagsCsv(Array.from(cur).join(", "));
   }
 
+  const checkinsSorted = useMemo(() => {
+    const arr = [...checkins];
+    arr.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+    return arr;
+  }, [checkins]);
+
+  const lastCheckin = checkinsSorted[0] || null;
+
+  const last7 = useMemo(() => {
+    // Build 7 day window including today
+    const today = new Date();
+    const keys: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      keys.push(dayKeyFromDate(addDays(today, -i)));
+    }
+
+    // group checkins by dayKey
+    const byDay = new Map<string, CheckIn[]>();
+    for (const c of checkins) {
+      const k = c.dayKey || dayKeyFromDate(new Date(c.ts));
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k)!.push(c);
+    }
+
+    const rows = keys.map((k) => {
+      const list = byDay.get(k) || [];
+      const n = list.length;
+      const avg = (field: "mood" | "energy" | "stress") =>
+        n ? list.reduce((s, x) => s + Number(x[field] || 0), 0) / n : null;
+
+      return {
+        dayKey: k,
+        count: n,
+        moodAvg: avg("mood"),
+        energyAvg: avg("energy"),
+        stressAvg: avg("stress"),
+      };
+    });
+
+    return rows;
+  }, [checkins]);
+
   if (!auth) {
     return (
       <div className="container" style={{ paddingTop: 18 }}>
@@ -342,7 +410,102 @@ export default function DashboardPage() {
         </div>
 
         <div className="body">
-          <div className="dashTabs">
+          {/* KPI row */}
+          <div className="kpiRow">
+            <div className="kpi">
+              <div className="small">Streak</div>
+              <div className="num">{summary?.streak ?? "—"}</div>
+              <div className="small">Days in a row</div>
+            </div>
+
+            <div className="kpi">
+              <div className="small">Mood avg (30d)</div>
+              <div className="num">{fmt1(summary?.overall?.moodAvg)}</div>
+              <div className="small">Aim: steady &gt; 6</div>
+            </div>
+
+            <div className="kpi">
+              <div className="small">Energy avg (30d)</div>
+              <div className="num">{fmt1(summary?.overall?.energyAvg)}</div>
+              <div className="small">Fuel management</div>
+            </div>
+
+            <div className="kpi">
+              <div className="small">Stress avg (30d)</div>
+              <div className="num">{fmt1(summary?.overall?.stressAvg)}</div>
+              <div className="small">Lower is better</div>
+            </div>
+
+            <div className="kpi">
+              <div className="small">Check-ins (30d)</div>
+              <div className="num">{checkins.length}</div>
+              <div className="small">Total stored</div>
+            </div>
+          </div>
+
+          {/* 7-day table */}
+          <div className="panel" style={{ marginTop: 14 }}>
+            <div className="panelTitle">
+              <span>Last 7 days</span>
+              <span className="badge">{lastCheckin ? `Last: ${new Date(lastCheckin.ts).toLocaleString()}` : "No check-ins yet"}</span>
+            </div>
+
+            <div className="miniTableWrap" style={{ marginTop: 12 }}>
+              <table className="miniTable">
+                <thead>
+                  <tr>
+                    <th>Day</th>
+                    <th>Count</th>
+                    <th>Mood</th>
+                    <th>Energy</th>
+                    <th>Stress</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {last7.map((r) => {
+                    const mood = r.moodAvg;
+                    const energy = r.energyAvg;
+                    const stress = r.stressAvg;
+
+                    return (
+                      <tr key={r.dayKey}>
+                        <td>{r.dayKey}</td>
+                        <td>{r.count}</td>
+                        <td>
+                          {mood === null ? (
+                            <span className="small">—</span>
+                          ) : (
+                            <span className={`badge ${badgeTone("mood", mood)}`}>{fmt1(mood)}</span>
+                          )}
+                        </td>
+                        <td>
+                          {energy === null ? (
+                            <span className="small">—</span>
+                          ) : (
+                            <span className={`badge ${badgeTone("energy", energy)}`}>{fmt1(energy)}</span>
+                          )}
+                        </td>
+                        <td>
+                          {stress === null ? (
+                            <span className="small">—</span>
+                          ) : (
+                            <span className={`badge ${badgeTone("stress", stress)}`}>{fmt1(stress)}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="small" style={{ marginTop: 10 }}>
+              Tip: If you miss days, don’t “make up” stories. Just restart the streak and keep it honest.
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className="dashTabs" style={{ marginTop: 14 }}>
             {tabs.map((t) => (
               <button
                 key={t.id}
@@ -378,9 +541,7 @@ export default function DashboardPage() {
                           value={mood}
                           onChange={(e) => setMood(Number(e.target.value))}
                         />
-                        <span className={`badge ${badgeClass(kpiKind(mood, "mood") as any)}`.replace("badge badge", "badge")}>
-                          {mood}
-                        </span>
+                        <span className={`badge ${badgeTone("mood", mood)}`}>{mood}</span>
                       </div>
                     </div>
 
@@ -395,9 +556,7 @@ export default function DashboardPage() {
                           value={energy}
                           onChange={(e) => setEnergy(Number(e.target.value))}
                         />
-                        <span className={`badge ${badgeClass(kpiKind(energy, "energy") as any)}`.replace("badge badge", "badge")}>
-                          {energy}
-                        </span>
+                        <span className={`badge ${badgeTone("energy", energy)}`}>{energy}</span>
                       </div>
                     </div>
 
@@ -412,9 +571,7 @@ export default function DashboardPage() {
                           value={stress}
                           onChange={(e) => setStress(Number(e.target.value))}
                         />
-                        <span className={`badge ${badgeClass(kpiKind(stress, "stress") as any)}`.replace("badge badge", "badge")}>
-                          {stress}
-                        </span>
+                        <span className={`badge ${badgeTone("stress", stress)}`}>{stress}</span>
                       </div>
                     </div>
                   </div>
@@ -517,16 +674,16 @@ export default function DashboardPage() {
               <div className="panel">
                 <div className="panelTitle">
                   <span>History</span>
-                  <span className="badge">{checkins.length} check-ins</span>
+                  <span className="badge">{checkinsSorted.length} check-ins</span>
                 </div>
 
-                {!checkins.length ? (
+                {!checkinsSorted.length ? (
                   <div className="small" style={{ marginTop: 12 }}>
                     No check-ins yet.
                   </div>
                 ) : (
                   <div className="list" style={{ marginTop: 12 }}>
-                    {checkins.map((c) => {
+                    {checkinsSorted.map((c) => {
                       const tags = tagsFromTagsJson(c.tagsJson);
                       return (
                         <div key={c.id} className="listItemStatic">
@@ -638,7 +795,7 @@ function PatternsPanel({ setError }: { setError: (s: string | null) => void }) {
         </div>
 
         <div className="small" style={{ marginTop: 10 }}>
-          Shows streak + averages (already supported by /api/analytics/summary).
+          Uses /api/analytics/summary (streak + averages).
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
