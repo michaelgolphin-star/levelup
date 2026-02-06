@@ -208,6 +208,32 @@ export async function ensureDb() {
     );
   `);
 
+  // --- Backfill/migrate inbox fields on older DBs (safe on Railway) ---
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS last_message_at TEXT;
+  `);
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS last_sender TEXT;
+  `);
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0;
+  `);
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+  `);
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT;
+  `);
+  await q(`
+    ALTER TABLE outlet_sessions
+      ADD COLUMN IF NOT EXISTS resolved_at TEXT;
+  `);
+
   await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
