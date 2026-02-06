@@ -99,3 +99,114 @@ hr{ border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .table th{ color: var(--muted); font-weight: 600; text-align:left; }
 
 h3{ font-size: 15px; }
+
+/* ---------------------------
+   Topbar (matches existing theme)
+--------------------------- */
+.topWrap { padding-top: 12px; }
+.topHdr { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+.topTitle { font-size: 18px; font-weight: 800; letter-spacing: .2px; margin:0; }
+.topNav { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+.topLink{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  text-decoration:none;
+  font-size: 13px;
+  color: var(--muted);
+}
+.topLink:hover{
+  background: rgba(255,255,255,.05);
+  border-color: var(--border);
+  color: var(--text);
+}
+.topLink.active{
+  background: rgba(96,165,250,.18);
+  border-color: rgba(96,165,250,.35);
+  color: var(--text);
+}
+
+/* ---------------------------
+   Counselor’s Office (minimal clean UI)
+--------------------------- */
+.outletGrid{ display:grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
+@media (max-width: 900px){ .outletGrid{ grid-template-columns: 1fr; } }
+
+.outletMetaRow{ display:flex; gap: 10px; flex-wrap:wrap; align-items:center; }
+.pill{
+  display:inline-flex;
+  align-items:center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.05);
+  color: var(--text);
+  font-size: 12px;
+}
+.pill.muted{ color: var(--muted); }
+
+.chat{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  max-height: 520px;
+  overflow:auto;
+  padding-right: 6px;
+}
+.msg{
+  max-width: 78%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.18);
+  white-space: pre-wrap;
+  line-height: 1.35;
+  font-size: 13px;
+}
+.msg.user{
+  margin-left:auto;
+  background: rgba(96,165,250,.14);
+  border-color: rgba(96,165,250,.25);
+}
+.msg.ai{
+  margin-right:auto;
+  background: rgba(255,255,255,.06);
+}
+.msgMeta{
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.chatComposer{
+  display:flex;
+  gap:10px;
+  align-items:flex-end;
+}
+.chatComposer .textarea{ min-height: 44px; resize: vertical; }
+
+.sessionItem{
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.16);
+  cursor:pointer;
+}
+.sessionItem:hover{ background: rgba(255,255,255,.05); }
+.sessionItem .title{ font-weight: 700; font-size: 13px; }
+.sessionItem .meta{ color: var(--muted); font-size: 12px; margin-top: 4px; }
+.sessionItem .status{
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sessionItem .status b{ color: var(--text); }
+
+.kbdHint{
+  font-size: 12px;
+  color: var(--muted);
+}
