@@ -84,8 +84,14 @@ function normalizeSender(v: any): OutletSender {
   return "user";
 }
 
+/**
+ * ensureDb()
+ * - Creates tables if missing
+ * - **Migrates existing tables safely** using ADD COLUMN IF NOT EXISTS
+ * - Creates indexes only after columns are guaranteed to exist
+ */
 export async function ensureDb() {
-  // Base tables
+  // 1) Base tables
   await q(`
     CREATE TABLE IF NOT EXISTS orgs (
       id TEXT PRIMARY KEY,
@@ -165,9 +171,7 @@ export async function ensureDb() {
       created_at TEXT NOT NULL
     );
 
-    -- Counselor’s Office / outlet sessions
-    -- NOTE: CREATE TABLE IF NOT EXISTS will NOT add new columns to an existing table.
-    -- We handle backfills with ALTER TABLE statements below.
+    -- Counselor’s Office / outlet sessions (table may exist from older builds)
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -176,17 +180,12 @@ export async function ensureDb() {
       category TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       risk_level INTEGER NOT NULL DEFAULT 0,
-
-      -- Inbox / workflow fields
       last_message_at TEXT,
       last_sender TEXT,
       message_count INTEGER NOT NULL DEFAULT 0,
-
-      -- Resolution fields (staff-only)
       resolution_note TEXT,
       resolved_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
       resolved_at TEXT,
-
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -211,37 +210,34 @@ export async function ensureDb() {
     );
   `);
 
-  // ✅ Backfill/upgrade outlet_sessions schema for existing DBs (fixes: "last_message_at does not exist")
+  // 2) 🔧 Migration safety: add missing columns to existing tables
+  // This prevents crashes like: "column last_message_at does not exist"
   await q(`
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS risk_level INTEGER NOT NULL DEFAULT 0;
-
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS status TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS risk_level INTEGER;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_message_at TEXT;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_sender TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0;
-
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolution_note TEXT;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_at TEXT;
-
-    -- Make sure FK exists for resolved_by_user_id if it was added later (best-effort).
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1
-        FROM   pg_constraint
-        WHERE  conname = 'outlet_sessions_resolved_by_user_id_fkey'
-      ) THEN
-        ALTER TABLE outlet_sessions
-          ADD CONSTRAINT outlet_sessions_resolved_by_user_id_fkey
-          FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
-      END IF;
-    EXCEPTION WHEN others THEN
-      -- ignore (constraint may already exist with a different name, or perms)
-      NULL;
-    END $$;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS created_at TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT;
   `);
 
-  // Indexes
+  // Defaults for existing rows where columns were just added (safe no-ops if already set)
+  await q(`
+    UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private');
+    UPDATE outlet_sessions SET status = COALESCE(status, 'open');
+    UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0);
+    UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0);
+    UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, '${nowIso()}');
+    UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, '${nowIso()}');
+  `);
+
+  // 3) Indexes (only after columns are guaranteed to exist)
   await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
