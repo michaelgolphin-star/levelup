@@ -61,7 +61,7 @@ function normalizeTags(tags: any): string[] {
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
 export type OutletStatus = "open" | "escalated" | "closed";
-export type OutletSender = "user" | "ai";
+export type OutletSender = "user" | "ai" | "staff";
 
 function normalizeVisibility(v: any): OutletVisibility {
   const s = String(v || "").toLowerCase();
@@ -75,6 +75,13 @@ function normalizeStatus(v: any): OutletStatus {
   if (s === "escalated") return "escalated";
   if (s === "closed") return "closed";
   return "open";
+}
+
+function normalizeSender(v: any): OutletSender {
+  const s = String(v || "").toLowerCase();
+  if (s === "ai") return "ai";
+  if (s === "staff") return "staff";
+  return "user";
 }
 
 export async function ensureDb() {
@@ -157,6 +164,7 @@ export async function ensureDb() {
       created_at TEXT NOT NULL
     );
 
+    -- Counselor’s Office / outlet sessions
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -165,6 +173,17 @@ export async function ensureDb() {
       category TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       risk_level INTEGER NOT NULL DEFAULT 0,
+
+      -- Inbox / workflow fields
+      last_message_at TEXT,
+      last_sender TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+
+      -- Resolution fields (staff-only)
+      resolution_note TEXT,
+      resolved_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      resolved_at TEXT,
+
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -206,6 +225,8 @@ export async function ensureDb() {
     CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility);
+    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_status ON outlet_sessions(org_id, status);
+    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_lastmsg ON outlet_sessions(org_id, last_message_at DESC);
 
     CREATE INDEX IF NOT EXISTS idx_outlet_messages_session_created ON outlet_messages(session_id, created_at ASC);
 
@@ -346,7 +367,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      checkin.tagsJson, // jsonb cast works fine from string
+      checkin.tagsJson,
       checkin.createdAt,
     ],
   );
@@ -387,8 +408,8 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
       energy: r.energy,
       stress: r.stress,
       note: r.note,
-      tags, // ✅ array for older UIs
-      tagsJson: JSON.stringify(tags), // ✅ string for newer typings
+      tags,
+      tagsJson: JSON.stringify(tags),
       createdAt: r.created_at,
     };
   });
@@ -583,6 +604,116 @@ export async function orgSummary(params: { orgId: string; days?: number }) {
   };
 }
 
+/** Outlet analytics (manager/admin) */
+export async function outletAnalyticsSummary(params: { orgId: string; days?: number }) {
+  const days = Math.max(7, Math.min(params.days ?? 30, 365));
+  const sinceIso = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString();
+
+  const totalsRows = await q<any>(
+    `
+    SELECT
+      COUNT(*)::int as sessions_total,
+      SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as sessions_open,
+      SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as sessions_escalated,
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as sessions_closed,
+      AVG(risk_level)::float as risk_avg
+    FROM outlet_sessions
+    WHERE org_id = $1 AND created_at >= $2
+    `,
+    [params.orgId, sinceIso],
+  );
+  const totals = totalsRows[0] || {};
+
+  const byCategory = await q<any>(
+    `
+    SELECT
+      COALESCE(NULLIF(TRIM(category), ''), 'uncategorized') as category,
+      COUNT(*)::int as sessions,
+      AVG(risk_level)::float as risk_avg,
+      SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as open,
+      SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as escalated,
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed
+    FROM outlet_sessions
+    WHERE org_id = $1 AND created_at >= $2
+    GROUP BY 1
+    ORDER BY sessions DESC
+    `,
+    [params.orgId, sinceIso],
+  );
+
+  const byDay = await q<any>(
+    `
+    SELECT
+      SUBSTRING(created_at, 1, 10) as day_key,
+      COUNT(*)::int as sessions,
+      AVG(risk_level)::float as risk_avg
+    FROM outlet_sessions
+    WHERE org_id = $1 AND created_at >= $2
+    GROUP BY 1
+    ORDER BY day_key ASC
+    `,
+    [params.orgId, sinceIso],
+  );
+
+  const riskTop = await q<any>(
+    `
+    SELECT
+      s.id as session_id,
+      s.user_id,
+      u.username,
+      s.status,
+      s.visibility,
+      s.category,
+      s.risk_level,
+      s.last_message_at,
+      s.created_at,
+      s.updated_at
+    FROM outlet_sessions s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.org_id = $1 AND s.created_at >= $2
+    ORDER BY s.risk_level DESC, s.updated_at DESC
+    LIMIT 15
+    `,
+    [params.orgId, sinceIso],
+  );
+
+  return {
+    days,
+    totals: {
+      sessionsTotal: totals.sessions_total ?? 0,
+      open: totals.sessions_open ?? 0,
+      escalated: totals.sessions_escalated ?? 0,
+      closed: totals.sessions_closed ?? 0,
+      riskAvg: totals.risk_avg ?? null,
+    },
+    byCategory: (byCategory || []).map((r: any) => ({
+      category: r.category,
+      sessions: r.sessions,
+      riskAvg: r.risk_avg ?? null,
+      open: r.open,
+      escalated: r.escalated,
+      closed: r.closed,
+    })),
+    byDay: (byDay || []).map((r: any) => ({
+      dayKey: r.day_key,
+      sessions: r.sessions,
+      riskAvg: r.risk_avg ?? null,
+    })),
+    riskTop: (riskTop || []).map((r: any) => ({
+      sessionId: r.session_id,
+      userId: r.user_id,
+      username: r.username,
+      status: normalizeStatus(r.status),
+      visibility: normalizeVisibility(r.visibility),
+      category: r.category ?? null,
+      riskLevel: r.risk_level ?? 0,
+      lastMessageAt: r.last_message_at ?? null,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    })),
+  };
+}
+
 /** Invites */
 export async function createInvite(params: { orgId: string; role: Role; expiresAt: string; createdBy: string }) {
   const token = nanoid(32);
@@ -733,9 +864,9 @@ export async function upsertUserProfile(params: {
     }
   })();
 
-  const nextFullName = params.fullName ?? existing.fullName ?? null;
-  const nextEmail = params.email ?? existing.email ?? null;
-  const nextPhone = params.phone ?? existing.phone ?? null;
+  const nextFullName = params.fullName ?? (existing as any).fullName ?? null;
+  const nextEmail = params.email ?? (existing as any).email ?? null;
+  const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
   await q(
@@ -809,14 +940,41 @@ export async function createOutletSession(params: {
     category: (params.category ?? null)?.trim?.() ?? params.category ?? null,
     status: "open" as OutletStatus,
     riskLevel: toInt(params.riskLevel, 0),
+    lastMessageAt: now,
+    lastSender: "user" as OutletSender,
+    messageCount: 0,
+    resolutionNote: null as string | null,
+    resolvedByUserId: null as string | null,
+    resolvedAt: null as string | null,
     createdAt: now,
     updatedAt: now,
   };
 
   await q(
-    `INSERT INTO outlet_sessions (id, org_id, user_id, visibility, category, status, risk_level, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [row.id, row.orgId, row.userId, row.visibility, row.category, row.status, row.riskLevel, row.createdAt, row.updatedAt],
+    `INSERT INTO outlet_sessions (
+        id, org_id, user_id, visibility, category, status, risk_level,
+        last_message_at, last_sender, message_count,
+        resolution_note, resolved_by_user_id, resolved_at,
+        created_at, updated_at
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+    [
+      row.id,
+      row.orgId,
+      row.userId,
+      row.visibility,
+      row.category,
+      row.status,
+      row.riskLevel,
+      row.lastMessageAt,
+      row.lastSender,
+      row.messageCount,
+      row.resolutionNote,
+      row.resolvedByUserId,
+      row.resolvedAt,
+      row.createdAt,
+      row.updatedAt,
+    ],
   );
 
   return row;
@@ -838,6 +996,12 @@ export async function getOutletSession(params: { orgId: string; sessionId: strin
     category: r.category ?? null,
     status: normalizeStatus(r.status),
     riskLevel: r.risk_level ?? 0,
+    lastMessageAt: r.last_message_at ?? null,
+    lastSender: r.last_sender ? normalizeSender(r.last_sender) : null,
+    messageCount: r.message_count ?? 0,
+    resolutionNote: r.resolution_note ?? null,
+    resolvedByUserId: r.resolved_by_user_id ?? null,
+    resolvedAt: r.resolved_at ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -861,6 +1025,12 @@ export async function listOutletSessionsForUser(params: { orgId: string; userId:
     category: r.category ?? null,
     status: normalizeStatus(r.status),
     riskLevel: r.risk_level ?? 0,
+    lastMessageAt: r.last_message_at ?? null,
+    lastSender: r.last_sender ? normalizeSender(r.last_sender) : null,
+    messageCount: r.message_count ?? 0,
+    resolutionNote: r.resolution_note ?? null,
+    resolvedByUserId: r.resolved_by_user_id ?? null,
+    resolvedAt: r.resolved_at ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }));
@@ -903,7 +1073,10 @@ export async function listOutletSessionsForStaff(params: {
           WHERE ${escWhere.join(" AND ")}
         )
       )
-    ORDER BY s.updated_at DESC
+    ORDER BY
+      COALESCE(s.last_message_at, s.updated_at) DESC,
+      s.risk_level DESC,
+      s.updated_at DESC
     LIMIT $${i}
     `,
     [...escArgs, limit],
@@ -917,6 +1090,12 @@ export async function listOutletSessionsForStaff(params: {
     category: r.category ?? null,
     status: normalizeStatus(r.status),
     riskLevel: r.risk_level ?? 0,
+    lastMessageAt: r.last_message_at ?? null,
+    lastSender: r.last_sender ? normalizeSender(r.last_sender) : null,
+    messageCount: r.message_count ?? 0,
+    resolutionNote: r.resolution_note ?? null,
+    resolvedByUserId: r.resolved_by_user_id ?? null,
+    resolvedAt: r.resolved_at ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }));
@@ -934,7 +1113,7 @@ export async function listOutletMessages(params: { orgId: string; sessionId: str
     id: r.id,
     orgId: r.org_id,
     sessionId: r.session_id,
-    sender: (r.sender === "ai" ? "ai" : "user") as OutletSender,
+    sender: normalizeSender(r.sender),
     content: r.content,
     createdAt: r.created_at,
   }));
@@ -956,11 +1135,17 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
   );
 
-  await q(`UPDATE outlet_sessions SET updated_at = $1 WHERE org_id = $2 AND id = $3`, [
-    msg.createdAt,
-    msg.orgId,
-    msg.sessionId,
-  ]);
+  // Update inbox fields
+  await q(
+    `UPDATE outlet_sessions
+     SET
+       updated_at = $1,
+       last_message_at = $1,
+       last_sender = $2,
+       message_count = COALESCE(message_count, 0) + 1
+     WHERE org_id = $3 AND id = $4`,
+    [msg.createdAt, msg.sender, msg.orgId, msg.sessionId],
+  );
 
   return msg;
 }
@@ -989,11 +1174,12 @@ export async function escalateOutletSession(params: {
     [esc.id, esc.orgId, esc.sessionId, esc.escalatedToRole, esc.assignedToUserId, esc.reason, esc.createdAt],
   );
 
-  await q(`UPDATE outlet_sessions SET status = 'escalated', updated_at = $1 WHERE org_id = $2 AND id = $3`, [
-    now,
-    params.orgId,
-    params.sessionId,
-  ]);
+  await q(
+    `UPDATE outlet_sessions
+     SET status = 'escalated', updated_at = $1
+     WHERE org_id = $2 AND id = $3`,
+    [now, params.orgId, params.sessionId],
+  );
 
   return esc;
 }
@@ -1004,6 +1190,36 @@ export async function closeOutletSession(params: { orgId: string; sessionId: str
     "WITH upd AS (UPDATE outlet_sessions SET status = 'closed', updated_at = $1 WHERE org_id = $2 AND id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
     [now, params.orgId, params.sessionId],
   );
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+export async function resolveOutletSession(params: {
+  orgId: string;
+  sessionId: string;
+  resolvedByUserId: string;
+  resolutionNote?: string | null;
+}) {
+  const now = nowIso();
+  const note = (params.resolutionNote ?? null)?.trim?.() ?? params.resolutionNote ?? null;
+
+  const rows = await q<{ count: string }>(
+    `
+    WITH upd AS (
+      UPDATE outlet_sessions
+      SET
+        status = 'closed',
+        resolution_note = $1,
+        resolved_by_user_id = $2,
+        resolved_at = $3,
+        updated_at = $3
+      WHERE org_id = $4 AND id = $5
+      RETURNING 1
+    )
+    SELECT COUNT(*)::text as count FROM upd
+    `,
+    [note, params.resolvedByUserId, now, params.orgId, params.sessionId],
+  );
+
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
