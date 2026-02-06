@@ -38,6 +38,10 @@ import {
   addOutletMessage,
   escalateOutletSession,
   closeOutletSession,
+
+  // NEW: outlet admin helpers
+  resolveOutletSession,
+  outletAnalyticsSummary,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
 
@@ -121,8 +125,7 @@ async function generateOutletAiReply(params: {
     "stop",
   ];
   const looksLikeClosure =
-    donePhrases.some((p) => lowered === p || lowered.includes(p)) ||
-    msg.length <= 2;
+    donePhrases.some((p) => lowered === p || lowered.includes(p)) || msg.length <= 2;
 
   if (looksLikeClosure) {
     return {
@@ -139,7 +142,6 @@ async function generateOutletAiReply(params: {
   // -----------------------------
   // Category + intent cues
   // -----------------------------
-  const category = (params.category || "").toLowerCase();
   const hasTimeWords = /today|yesterday|last week|this week|shift|schedule|hours|overtime|late|relief/.test(lowered);
   const hasPayWords = /pay|wage|raise|hours|shorted|missing|tips|commission|bonus|rate/.test(lowered);
   const hasConflictWords = /manager|supervisor|coworker|harass|bully|yell|argument|threat|disrespect/.test(lowered);
@@ -187,14 +189,8 @@ async function generateOutletAiReply(params: {
   // -----------------------------
   // Default: one focused follow-up
   // -----------------------------
-  // We avoid repeating the same 3 questions every time.
-  // We pick ONE best next question based on what’s missing.
   const looksLikeVague =
-    msg.length < 40 &&
-    !hasTimeWords &&
-    !hasPayWords &&
-    !hasConflictWords &&
-    !hasSafetyWords;
+    msg.length < 40 && !hasTimeWords && !hasPayWords && !hasConflictWords && !hasSafetyWords;
 
   if (looksLikeVague) {
     return {
@@ -256,6 +252,10 @@ const OutletEscalateSchema = z.object({
   escalatedToRole: z.enum(["manager", "admin"]),
   assignedToUserId: z.string().min(3).optional().nullable(),
   reason: z.string().max(500).optional().nullable(),
+});
+
+const OutletResolveSchema = z.object({
+  resolutionNote: z.string().max(2000).optional().nullable(),
 });
 
 export function registerRoutes(app: Express) {
@@ -695,6 +695,44 @@ export function registerRoutes(app: Express) {
 
     const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
     return res.json({ ok: !!ok });
+  });
+
+  // Staff: resolve w/ a short note (manager/admin)
+  app.post("/api/outlet/sessions/:id/resolve", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
+    const sessionId = String(req.params.id || "");
+    const parsed = OutletResolveSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const auth = (req as any).auth!;
+    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    // Staff can only resolve sessions they are allowed to view
+    const vis = String(session.visibility || "private");
+    const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
+    if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
+
+    const ok = await resolveOutletSession({
+      orgId: auth.orgId,
+      sessionId,
+      resolvedByUserId: auth.userId,
+      resolutionNote: parsed.data.resolutionNote ?? null,
+    });
+
+    return res.json({ ok: !!ok });
+  });
+
+  // Staff analytics for Counselor’s Office (manager/admin)
+  app.get("/api/outlet/analytics/summary", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
+    const schema = z.object({ days: z.string().optional() });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+
+    const summary = await outletAnalyticsSummary({ orgId: (req as any).auth!.orgId, days });
+    return res.json({ summary });
   });
 
   // -----------------------------
