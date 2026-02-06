@@ -82,7 +82,6 @@ export function OutletHomePage() {
       try {
         await loadAuth();
       } catch {
-        // if auth fails, RequireAuth should have redirected already, but just in case:
         nav("/login");
         return;
       }
@@ -110,8 +109,12 @@ export function OutletHomePage() {
             <div className="sub">Private outlet + documentation + escalation (if needed).</div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <Link className="btn" to="/dashboard">Dashboard</Link>
-            <button className="btn primary" onClick={createSession}>New session</button>
+            <Link className="btn" to="/dashboard">
+              Dashboard
+            </Link>
+            <button className="btn primary" onClick={createSession}>
+              New session
+            </button>
           </div>
         </div>
 
@@ -153,7 +156,9 @@ export function OutletHomePage() {
                 </div>
 
                 <div className="col" style={{ flexBasis: 180, alignSelf: "flex-end" }}>
-                  <button className="btn primary" onClick={createSession}>Start</button>
+                  <button className="btn primary" onClick={createSession}>
+                    Start
+                  </button>
                 </div>
               </div>
 
@@ -218,11 +223,10 @@ export function OutletHomePage() {
                     >
                       <div className="listTop">
                         <div>
-                          <div className="listTitle">
-                            {s.category ? s.category : "General"}
-                          </div>
+                          <div className="listTitle">{s.category ? s.category : "General"}</div>
                           <div className="small">
-                            {statusLabel(s.status)} • {visLabel(s.visibility)} • {new Date(s.createdAt).toLocaleString()}
+                            {statusLabel(s.status)} • {visLabel(s.visibility)} •{" "}
+                            {new Date(s.createdAt).toLocaleString()}
                           </div>
                         </div>
 
@@ -287,7 +291,6 @@ export function OutletSessionPage() {
       setMessages(r.messages || []);
     } catch (e: any) {
       setToast({ type: "bad", text: e.message || "Failed to load session." });
-      // bounce back after a moment
       setTimeout(() => nav("/outlet"), 350);
     } finally {
       setLoading(false);
@@ -366,7 +369,8 @@ export function OutletSessionPage() {
             <div className="sub">
               {session ? (
                 <>
-                  {session.category ? session.category : "General"} • {statusLabel(session.status)} • {visLabel(session.visibility)}
+                  {session.category ? session.category : "General"} • {statusLabel(session.status)} •{" "}
+                  {visLabel(session.visibility)}
                 </>
               ) : (
                 "Session"
@@ -374,8 +378,12 @@ export function OutletSessionPage() {
             </div>
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Link className="btn" to="/outlet">Back</Link>
-            <button className="btn" onClick={load} disabled={loading}>Refresh</button>
+            <Link className="btn" to="/outlet">
+              Back
+            </Link>
+            <button className="btn" onClick={load} disabled={loading}>
+              Refresh
+            </button>
           </div>
         </div>
 
@@ -509,18 +517,10 @@ export function OutletSessionPage() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-                      <button
-                        className="btn primary"
-                        onClick={escalate}
-                        disabled={!canEscalate || session.status === "closed"}
-                      >
+                      <button className="btn primary" onClick={escalate} disabled={!canEscalate || session.status === "closed"}>
                         Escalate
                       </button>
-                      <button
-                        className="btn danger"
-                        onClick={closeSession}
-                        disabled={!canClose || session.status === "closed"}
-                      >
+                      <button className="btn danger" onClick={closeSession} disabled={!canClose || session.status === "closed"}>
                         Close session
                       </button>
                     </div>
@@ -535,9 +535,12 @@ export function OutletSessionPage() {
                   <div className="listItemStatic">
                     <div className="listTitle">What this does (MVP)</div>
                     <div className="small" style={{ marginTop: 6 }}>
-                      • Escalation changes visibility/state on the backend.<br/>
-                      • Staff can view only when visibility permits.<br/>
-                      • Sending is owner-only (safe default).<br/>
+                      • Escalation changes visibility/state on the backend.
+                      <br />
+                      • Staff can view only when visibility permits.
+                      <br />
+                      • Sending is owner-only (safe default).
+                      <br />
                       • Closing locks the session.
                     </div>
                   </div>
