@@ -142,6 +142,17 @@ function badgeTone(which: "mood" | "energy" | "stress", v: number) {
   return "good";
 }
 
+function countDaysWhere(rows: { stressAvg: number | null; moodAvg: number | null; energyAvg: number | null }[], fn: (r: any) => boolean) {
+  let n = 0;
+  for (const r of rows) if (fn(r)) n++;
+  return n;
+}
+
+function safeNum(x: any): number | null {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+
 export default function DashboardPage() {
   const nav = useNavigate();
 
@@ -361,6 +372,93 @@ export default function DashboardPage() {
     return rows;
   }, [checkins]);
 
+  // -----------------------------
+  // Today’s Insight (no backend changes)
+  // -----------------------------
+  const todayInsight = useMemo(() => {
+    const todayKey = dayKeyFromDate(new Date());
+    const checkedInToday = !!checkins.find((c) => (c.dayKey || dayKeyFromDate(new Date(c.ts))) === todayKey);
+
+    const daysWithStressHigh = countDaysWhere(last7, (r) => safeNum(r.stressAvg) !== null && Number(r.stressAvg) >= 7);
+    const daysWithEnergyLow = countDaysWhere(last7, (r) => safeNum(r.energyAvg) !== null && Number(r.energyAvg) <= 4);
+    const daysWithMoodLow = countDaysWhere(last7, (r) => safeNum(r.moodAvg) !== null && Number(r.moodAvg) <= 4);
+
+    // Priority order:
+    // 1) No check-in today
+    // 2) Stress elevated multiple days
+    // 3) Energy low multiple days
+    // 4) Mood low multiple days
+    // 5) Streak encouragement
+    if (!checkedInToday) {
+      return {
+        tone: "warn" as const,
+        title: "Today’s Insight",
+        text: "You haven’t checked in today. A 20-second check-in keeps the streak honest and the data useful.",
+        ctaLabel: "Do today’s check-in",
+        action: () => setTab("checkin"),
+        helper: "Tip: keep it short — numbers + one sentence is enough.",
+      };
+    }
+
+    if (daysWithStressHigh >= 3) {
+      return {
+        tone: "bad" as const,
+        title: "Today’s Insight",
+        text: `Stress has been high on ${daysWithStressHigh} of the last 7 days. Consider documenting what’s driving it before it stacks.`,
+        ctaLabel: "Open Counselor’s Office",
+        action: () => nav("/outlet"),
+        helper: "You can keep it private, and only escalate if you choose.",
+      };
+    }
+
+    if (daysWithEnergyLow >= 3) {
+      return {
+        tone: "warn" as const,
+        title: "Today’s Insight",
+        text: `Energy has been low on ${daysWithEnergyLow} of the last 7 days. This usually means sleep, workload, or recovery needs attention.`,
+        ctaLabel: "Review your last 7 days",
+        action: () => {
+          // Just scroll the user to the table visually by switching to check-in tab (table is above tabs)
+          setTab("checkin");
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        },
+        helper: "Look for patterns: shift days, late nights, high workload tags.",
+      };
+    }
+
+    if (daysWithMoodLow >= 3) {
+      return {
+        tone: "warn" as const,
+        title: "Today’s Insight",
+        text: `Mood has dipped on ${daysWithMoodLow} of the last 7 days. That’s a signal — not a failure.`,
+        ctaLabel: "View history",
+        action: () => setTab("history"),
+        helper: "Check notes/tags for repeat triggers you can actually control.",
+      };
+    }
+
+    const streak = Number(summary?.streak || 0);
+    if (streak >= 3) {
+      return {
+        tone: "good" as const,
+        title: "Today’s Insight",
+        text: `Streak is at ${streak}. Keep it simple: consistency beats perfect entries.`,
+        ctaLabel: "Add a habit",
+        action: () => addHabit(),
+        helper: "Pick something tiny you can repeat even on bad days.",
+      };
+    }
+
+    return {
+      tone: "good" as const,
+      title: "Today’s Insight",
+      text: "You’re in a good rhythm. Keep logging and let patterns reveal themselves over time.",
+      ctaLabel: "Refresh",
+      action: () => refreshData(),
+      helper: lastCheckin ? `Last check-in: ${new Date(lastCheckin.ts).toLocaleString()}` : "",
+    };
+  }, [checkins, last7, summary?.streak, lastCheckin, nav]);
+
   if (!auth) {
     return (
       <div className="container" style={{ paddingTop: 18 }}>
@@ -437,9 +535,42 @@ export default function DashboardPage() {
             </div>
 
             <div className="kpi">
-              <div className="small">Check-ins (30d)</div>
+              <div className="small">Check-ins (stored)</div>
               <div className="num">{checkins.length}</div>
-              <div className="small">Total stored</div>
+              <div className="small">Total saved</div>
+            </div>
+          </div>
+
+          {/* Today’s Insight */}
+          <div className="panel" style={{ marginTop: 14 }}>
+            <div className="panelTitle">
+              <span>{todayInsight.title}</span>
+              <span className={`badge ${todayInsight.tone}`}>{todayInsight.tone === "bad" ? "Action" : todayInsight.tone === "warn" ? "Nudge" : "On track"}</span>
+            </div>
+
+            <div className="bubbleText" style={{ marginTop: 10 }}>
+              {todayInsight.text}
+            </div>
+
+            {todayInsight.helper ? (
+              <div className="small" style={{ marginTop: 8 }}>
+                {todayInsight.helper}
+              </div>
+            ) : null}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+              <button className="btn primary" onClick={todayInsight.action} disabled={loading || saving}>
+                {todayInsight.ctaLabel}
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  // quick “reset” action without navigating away
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                Back to top
+              </button>
             </div>
           </div>
 
@@ -447,7 +578,9 @@ export default function DashboardPage() {
           <div className="panel" style={{ marginTop: 14 }}>
             <div className="panelTitle">
               <span>Last 7 days</span>
-              <span className="badge">{lastCheckin ? `Last: ${new Date(lastCheckin.ts).toLocaleString()}` : "No check-ins yet"}</span>
+              <span className="badge">
+                {lastCheckin ? `Last: ${new Date(lastCheckin.ts).toLocaleString()}` : "No check-ins yet"}
+              </span>
             </div>
 
             <div className="miniTableWrap" style={{ marginTop: 12 }}>
