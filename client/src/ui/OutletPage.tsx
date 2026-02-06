@@ -1,121 +1,202 @@
-/* ---- Counselor’s Office helpers (append at bottom) ---- */
+import React, { useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { api } from "../lib/api";
 
-.grid2 {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-}
-@media (min-width: 900px) {
-  .grid2 {
-    grid-template-columns: 1fr 1fr;
+/* ----------------------------------------
+   Outlet Home (session list + create)
+----------------------------------------- */
+
+export function OutletHomePage() {
+  const nav = useNavigate();
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      setLoading(true);
+      const r = await api.outletListMySessions(50);
+      setSessions(r.sessions || []);
+    } catch (e: any) {
+      setError(e.message || "Failed to load sessions");
+    } finally {
+      setLoading(false);
+    }
   }
+
+  async function createSession() {
+    try {
+      const r = await api.outletCreateSession({ visibility: "private" });
+      nav(`/outlet/${r.session.id}`);
+    } catch (e: any) {
+      alert(e.message || "Failed to create session");
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  return (
+    <div className="container">
+      <div className="card">
+        <div className="hdr">
+          <div>
+            <h1>Counselor’s Office</h1>
+            <div className="sub">
+              A private space to talk, document, or escalate concerns.
+            </div>
+          </div>
+          <button className="btn primary" onClick={createSession}>
+            New session
+          </button>
+        </div>
+
+        <div className="body">
+          {loading && <div className="small">Loading…</div>}
+          {error && <div className="small" style={{ color: "var(--bad)" }}>{error}</div>}
+
+          {!loading && sessions.length === 0 && (
+            <div className="small">No sessions yet.</div>
+          )}
+
+          <div className="row">
+            {sessions.map((s) => (
+              <div key={s.id} className="col">
+                <div
+                  className="card body"
+                  style={{ cursor: "pointer" }}
+                  onClick={() => nav(`/outlet/${s.id}`)}
+                >
+                  <div style={{ fontWeight: 700 }}>
+                    Session
+                  </div>
+                  <div className="small">
+                    Status: {s.status}
+                  </div>
+                  <div className="small">
+                    Created: {new Date(s.createdAt).toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-.panel {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
-  padding: 14px;
-  background: rgba(255, 255, 255, 0.04);
-}
+/* ----------------------------------------
+   Outlet Session (chat view)
+----------------------------------------- */
 
-.panelTitle {
-  font-weight: 800;
-  letter-spacing: 0.2px;
-}
+export function OutletSessionPage() {
+  const { id } = useParams();
+  const nav = useNavigate();
 
-.list {
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-}
+  const [messages, setMessages] = useState<any[]>([]);
+  const [session, setSession] = useState<any | null>(null);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(true);
 
-.listItem {
-  text-align: left;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.20);
-  cursor: pointer;
-}
-.listItem:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-.listItemStatic {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.20);
-}
+  async function load() {
+    if (!id) return;
+    try {
+      const r = await api.outletGetSession(id);
+      setSession(r.session);
+      setMessages(r.messages || []);
+    } catch (e: any) {
+      alert(e.message || "Failed to load session");
+      nav("/outlet");
+    } finally {
+      setLoading(false);
+    }
+  }
 
-.listTop {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: flex-start;
-}
+  async function send() {
+    if (!id || !input.trim()) return;
+    const text = input.trim();
+    setInput("");
 
-.listTitle {
-  font-weight: 800;
-}
+    try {
+      const r = await api.outletSendMessage(id, text);
+      setMessages((m) => [...m, r.userMessage, r.aiMessage]);
+    } catch (e: any) {
+      alert(e.message || "Failed to send message");
+    }
+  }
 
-.chips {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
+  useEffect(() => {
+    load();
+  }, [id]);
 
-.chip {
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-}
-.chip.danger {
-  border-color: rgba(251, 113, 133, 0.45);
-  background: rgba(251, 113, 133, 0.12);
-}
+  return (
+    <div className="container">
+      <div className="card">
+        <div className="hdr">
+          <div>
+            <h1>Counselor’s Office</h1>
+            <div className="sub">Private conversation</div>
+          </div>
+          <Link to="/outlet" className="btn">
+            Back
+          </Link>
+        </div>
 
-.chatBox {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
-  background: rgba(0, 0, 0, 0.20);
-  padding: 12px;
-  max-height: 420px;
-  overflow: auto;
-}
+        <div className="body">
+          {loading && <div className="small">Loading…</div>}
 
-.chatList {
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-}
+          {!loading && (
+            <>
+              <div
+                style={{
+                  maxHeight: 420,
+                  overflow: "auto",
+                  display: "grid",
+                  gap: 10,
+                  marginBottom: 12,
+                }}
+              >
+                {messages.map((m) => (
+                  <div
+                    key={m.id}
+                    className="card"
+                    style={{
+                      background:
+                        m.sender === "user"
+                          ? "rgba(34,197,94,.10)"
+                          : "rgba(59,130,246,.10)",
+                    }}
+                  >
+                    <div className="small">
+                      {m.sender === "user" ? "You" : "Counselor"}
+                    </div>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+                  </div>
+                ))}
+              </div>
 
-.bubble {
-  border-radius: 14px;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.bubble.user {
-  background: rgba(34, 197, 94, 0.10);
-  border-color: rgba(34, 197, 94, 0.25);
-}
-
-.bubble.ai {
-  background: rgba(59, 130, 246, 0.10);
-  border-color: rgba(59, 130, 246, 0.25);
-}
-
-.bubbleMeta {
-  font-size: 12px;
-  opacity: 0.8;
-  margin-bottom: 6px;
-}
-
-.bubbleText {
-  white-space: pre-wrap;
-  line-height: 1.35;
+              <div className="row">
+                <div className="col">
+                  <textarea
+                    className="textarea"
+                    rows={3}
+                    placeholder="Type what’s on your mind…"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                  />
+                </div>
+                <div className="col" style={{ flexBasis: 160 }}>
+                  <button className="btn primary" onClick={send}>
+                    Send
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
