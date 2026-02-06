@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
-import { apiGet, apiPost, apiPut } from "../lib/api";
+import { api, apiGet, apiPost, apiPut, getToken } from "../lib/api";
 
 type Org = { id: string; name: string };
 type User = { id: string; username: string; role: Role; orgId: string };
@@ -25,7 +25,7 @@ type CheckIn = {
   energy: number;
   stress: number;
   note?: string | null;
-  tags?: string[];
+  tagsJson?: string; // backend returns tagsJson (stringified JSON)
 };
 
 type Habit = {
@@ -159,20 +159,33 @@ function Select({
   );
 }
 
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
 function parseTagsCSV(s: string): string[] {
   return s
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean)
-    .slice(0, 30);
+    .slice(0, 20);
+}
+
+function tagsFromTagsJson(tagsJson?: string): string[] {
+  if (!tagsJson) return [];
+  try {
+    const x = JSON.parse(tagsJson);
+    return Array.isArray(x) ? x.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function downloadCsv(path: string, filename: string) {
+  const token = getToken() || "";
   const res = await fetch(path, {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-    },
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
 
   if (!res.ok) {
@@ -205,7 +218,16 @@ export default function DashboardPage() {
   const [checkins, setCheckins] = useState<CheckIn[]>([]);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Check-in form state
+  const [mood, setMood] = useState(7);
+  const [energy, setEnergy] = useState(6);
+  const [stress, setStress] = useState(4);
+  const [note, setNote] = useState("");
+  const [tagsCsv, setTagsCsv] = useState("");
+  const quickTags = ["workload", "scheduling", "conflict", "pay", "customers", "fatigue", "safety"];
 
   const role = auth?.role;
   const isStaff = role === "admin" || role === "manager";
@@ -221,7 +243,27 @@ export default function DashboardPage() {
     if (isStaff) base.push({ id: "trends", label: "Program Trends" });
     if (isStaff) base.push({ id: "org", label: "People & Roles" });
     return base;
-  }, [isStaff]);
+  }, [isStaff, tab]);
+
+  async function refreshData() {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const [c, h] = await Promise.all([
+        api.listCheckins(200),
+        api.listHabits(false),
+      ]);
+
+      // normalize to the local types
+      setCheckins((c.checkins || []) as any);
+      setHabits((h.habits || []) as any);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load dashboard data.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     (async () => {
@@ -232,7 +274,8 @@ export default function DashboardPage() {
         const o = await apiGet<{ org: Org }>("/api/org");
         setOrg(o.org);
       } catch (e: any) {
-        localStorage.removeItem("token");
+        // token missing/invalid
+        setError(null);
         nav("/login");
       }
     })();
@@ -240,29 +283,98 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!auth) return;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const [c, h] = await Promise.all([
-          apiGet<{ checkins: CheckIn[] }>("/api/checkins?limit=200"),
-          apiGet<{ habits: Habit[] }>("/api/habits?includeArchived=0"),
-        ]);
-
-        setCheckins(c.checkins || []);
-        setHabits(h.habits || []);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load dashboard data.");
-      } finally {
-        setLoading(false);
-      }
-    })();
+    refreshData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
   function logout() {
+    // token key is handled by lib/api.ts. safest is to clear both if old keys exist.
+    localStorage.removeItem("levelup_token");
     localStorage.removeItem("token");
     nav("/login");
+  }
+
+  async function submitCheckin() {
+    setSaving(true);
+    setError(null);
+
+    try {
+      const tags = parseTagsCSV(tagsCsv);
+
+      await api.createCheckin({
+        mood: clamp(mood, 1, 10),
+        energy: clamp(energy, 1, 10),
+        stress: clamp(stress, 1, 10),
+        note: note.trim() ? note.trim() : undefined,
+        tags: tags.length ? tags : undefined,
+      });
+
+      setNote("");
+      // keep tagsCsv so it’s easy to reuse tags; change if you want:
+      // setTagsCsv("");
+
+      await refreshData();
+      setTab("history");
+    } catch (e: any) {
+      setError(e?.message || "Failed to submit check-in.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addHabit() {
+    const name = prompt("Habit name (e.g., 'Drink water'):");
+    if (!name?.trim()) return;
+
+    const targetRaw = prompt("Target per week (1-14):", "5");
+    const target = clamp(Number(targetRaw || "5"), 1, 14);
+
+    setSaving(true);
+    setError(null);
+    try {
+      await api.createHabit({ name: name.trim(), targetPerWeek: target });
+      await refreshData();
+      setTab("habits");
+    } catch (e: any) {
+      setError(e?.message || "Failed to create habit.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function archiveHabit(id: string) {
+    if (!confirm("Archive this habit?")) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.archiveHabit(id);
+      await refreshData();
+    } catch (e: any) {
+      setError(e?.message || "Failed to archive habit.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteCheckin(id: string) {
+    if (!confirm("Delete this check-in?")) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.deleteCheckin(id);
+      await refreshData();
+    } catch (e: any) {
+      setError(e?.message || "Failed to delete check-in.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleQuickTag(t: string) {
+    const cur = new Set(parseTagsCSV(tagsCsv));
+    if (cur.has(t)) cur.delete(t);
+    else cur.add(t);
+    setTagsCsv(Array.from(cur).join(", "));
   }
 
   if (!auth) {
@@ -343,8 +455,8 @@ export default function DashboardPage() {
         {!loading && tab !== "org" && (
           <div className="mt-6 grid gap-4">
             {tab === "checkin" && <CheckInPanel />}
-            {tab === "history" && <HistoryPanel checkins={checkins} />}
-            {tab === "habits" && <HabitsPanel habits={habits} />}
+            {tab === "history" && <HistoryPanel />}
+            {tab === "habits" && <HabitsPanel />}
             {tab === "patterns" && <PatternsPanel />}
             {tab === "trends" && isStaff && <TrendsPanel />}
           </div>
@@ -353,49 +465,235 @@ export default function DashboardPage() {
     </div>
   );
 
-  // ---------------- Panels (kept minimal; your existing logic stays)
+  // ---------------- Panels
   // ----------------
 
   function CheckInPanel() {
     return (
       <Card title="Check in" subtitle="Show up. Check in. Adjust. Repeat.">
-        <div className="text-sm text-white/60">
-          (No changes here for Phase 2 Step 1.)
+        <div className="grid gap-4">
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-white/70">Mood</div>
+              <Pill>{mood}</Pill>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              value={mood}
+              onChange={(e) => setMood(Number(e.target.value))}
+              className="w-full"
+            />
+
+            <div className="flex items-center justify-between mt-2">
+              <div className="text-sm text-white/70">Energy</div>
+              <Pill>{energy}</Pill>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              value={energy}
+              onChange={(e) => setEnergy(Number(e.target.value))}
+              className="w-full"
+            />
+
+            <div className="flex items-center justify-between mt-2">
+              <div className="text-sm text-white/70">Stress</div>
+              <Pill>{stress}</Pill>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              value={stress}
+              onChange={(e) => setStress(Number(e.target.value))}
+              className="w-full"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <div className="text-xs text-white/60">Quick tags</div>
+            <div className="flex flex-wrap gap-2">
+              {quickTags.map((t) => {
+                const active = parseTagsCSV(tagsCsv).includes(t);
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => toggleQuickTag(t)}
+                    className={
+                      "rounded-full border px-3 py-1 text-xs transition " +
+                      (active
+                        ? "border-white/20 bg-white/15 text-white"
+                        : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10")
+                    }
+                  >
+                    {t}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <div className="text-xs text-white/60">Tags (comma separated)</div>
+            <Input
+              value={tagsCsv}
+              onChange={setTagsCsv}
+              placeholder="workload, scheduling, conflict…"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <div className="text-xs text-white/60">Note (optional)</div>
+            <TextArea value={note} onChange={setNote} placeholder="What happened today? What do you need?" />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button onClick={submitCheckin} disabled={saving}>
+              {saving ? "Saving…" : "Submit check-in"}
+            </Button>
+            <Button variant="ghost" onClick={refreshData} disabled={loading || saving}>
+              Refresh
+            </Button>
+          </div>
         </div>
       </Card>
     );
   }
 
-  function HistoryPanel({ checkins }: { checkins: CheckIn[] }) {
+  function HistoryPanel() {
     return (
       <Card title="History" subtitle="Your recent check-ins.">
-        <div className="text-sm text-white/60">
-          Check-ins loaded: {checkins.length}
-        </div>
+        {checkins.length === 0 ? (
+          <div className="text-sm text-white/60">No check-ins yet.</div>
+        ) : (
+          <div className="grid gap-3">
+            {checkins.map((c) => {
+              const tags = tagsFromTagsJson(c.tagsJson);
+              return (
+                <div key={c.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm text-white/60">{new Date(c.ts).toLocaleString()}</div>
+                      <div className="mt-1 text-sm">
+                        Mood <b>{c.mood}</b> • Energy <b>{c.energy}</b> • Stress <b>{c.stress}</b>
+                      </div>
+                      {c.note ? (
+                        <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{c.note}</div>
+                      ) : null}
+                      {tags.length ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {tags.map((t) => (
+                            <Pill key={t}>{t}</Pill>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <Button variant="ghost" onClick={() => deleteCheckin(c.id)} disabled={saving}>
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
     );
   }
 
-  function HabitsPanel({ habits }: { habits: Habit[] }) {
+  function HabitsPanel() {
     return (
       <Card title="Habits" subtitle="Track the reps.">
-        <div className="text-sm text-white/60">Habits loaded: {habits.length}</div>
+        <div className="flex items-center gap-2">
+          <Button onClick={addHabit} disabled={saving}>Add habit</Button>
+          <Button variant="ghost" onClick={refreshData} disabled={loading || saving}>Refresh</Button>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          {habits.length === 0 ? (
+            <div className="text-sm text-white/60">No habits yet.</div>
+          ) : (
+            habits.map((h) => (
+              <div key={h.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold">{h.name}</div>
+                    <div className="text-xs text-white/60">Target/week: {h.targetPerWeek}</div>
+                    {h.archivedAt ? <div className="text-xs text-white/40">Archived</div> : null}
+                  </div>
+                  {!h.archivedAt ? (
+                    <Button variant="ghost" onClick={() => archiveHabit(h.id)} disabled={saving}>
+                      Archive
+                    </Button>
+                  ) : (
+                    <Pill>archived</Pill>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </Card>
     );
   }
 
   function PatternsPanel() {
     return (
-      <Card title="My Patterns" subtitle="Trends in mood/energy/stress.">
-        <div className="text-sm text-white/60">(No changes here for Phase 2 Step 1.)</div>
+      <Card title="My Patterns" subtitle="Quick summary (30 days).">
+        <div className="text-sm text-white/60">
+          This panel can show averages + streaks (already supported by /api/analytics/summary).
+        </div>
+        <div className="mt-3">
+          <Button
+            onClick={async () => {
+              setError(null);
+              try {
+                const r = await api.summary(30);
+                const s = r.summary;
+                alert(
+                  `Last ${s.days} days\nStreak: ${s.streak}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${s.overall.energyAvg ?? "—"}\nStress avg: ${s.overall.stressAvg ?? "—"}`,
+                );
+              } catch (e: any) {
+                setError(e?.message || "Failed to load summary.");
+              }
+            }}
+          >
+            View 30-day summary
+          </Button>
+        </div>
       </Card>
     );
   }
 
   function TrendsPanel() {
     return (
-      <Card title="Program Trends" subtitle="Staff-only aggregate view.">
-        <div className="text-sm text-white/60">(No changes here for Phase 2 Step 1.)</div>
+      <Card title="Program Trends" subtitle="Staff-only aggregate view (30 days).">
+        <div className="text-sm text-white/60">
+          Uses /api/analytics/org-summary. This is safe, fast, and anonymous at the aggregate level.
+        </div>
+        <div className="mt-3">
+          <Button
+            onClick={async () => {
+              setError(null);
+              try {
+                const r = await api.orgSummary(30);
+                const s = r.summary;
+                alert(
+                  `Org (last ${s.days} days)\nUsers: ${s.overall.users}\nCheck-ins: ${s.overall.checkins}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${s.overall.energyAvg ?? "—"}\nStress avg: ${s.overall.stressAvg ?? "—"}`,
+                );
+              } catch (e: any) {
+                setError(e?.message || "Failed to load org summary.");
+              }
+            }}
+          >
+            View org summary
+          </Button>
+        </div>
       </Card>
     );
   }
@@ -574,10 +872,7 @@ function OrgPanel({
                 <Button
                   onClick={async () => {
                     try {
-                      await downloadCsv(
-                        "/api/export/checkins.csv?sinceDays=365",
-                        "checkins_365d.csv",
-                      );
+                      await downloadCsv("/api/export/checkins.csv?sinceDays=365", "checkins_365d.csv");
                     } catch (e: any) {
                       setMsg(e?.message || "Export failed.");
                     }
@@ -808,14 +1103,15 @@ function OrgPanel({
 
                     <div className="mt-2 space-y-2">
                       {selectedNotes.map((n) => (
-                        <div key={n.id} className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
+                        <div
+                          key={n.id}
+                          className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-white/70"
+                        >
                           <div className="text-white/50">{new Date(n.createdAt).toLocaleString()}</div>
                           <div className="mt-1">{n.note}</div>
                         </div>
                       ))}
-                      {!selectedNotes.length && (
-                        <div className="text-xs text-white/50">No notes yet.</div>
-                      )}
+                      {!selectedNotes.length && <div className="text-xs text-white/50">No notes yet.</div>}
                     </div>
                   </div>
                 )}
