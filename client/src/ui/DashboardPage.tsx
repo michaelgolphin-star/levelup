@@ -905,7 +905,9 @@ export default function DashboardPage() {
             </div>
           ) : null}
 
-          {tab === "patterns" ? <PatternsPanel setError={setError} /> : null}
+          {tab === "patterns" ? (
+            <PatternsPanel setError={setError} summary={summary} checkins={checkins} onRefresh={refreshData} />
+          ) : null}
           {tab === "trends" && isStaff ? <TrendsPanel setError={setError} /> : null}
           {tab === "org" && isStaff ? (
             <div style={{ marginTop: 14 }}>
