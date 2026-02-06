@@ -1,13 +1,6 @@
-// App.tsx (FULL REPLACEMENT)
+// client/src/ui/App.tsx (FULL REPLACEMENT)
 import React from "react";
-import {
-  Routes,
-  Route,
-  Navigate,
-  Link,
-  useNavigate,
-  useParams,
-} from "react-router-dom";
+import { Routes, Route, Navigate, Link, useNavigate, useParams, useLocation } from "react-router-dom";
 import { getToken, setToken } from "../lib/api";
 import AuthPage from "./AuthPage";
 import DashboardPage from "./DashboardPage";
@@ -38,19 +31,43 @@ type OutletMessage = {
   createdAt: string;
 };
 
+/**
+ * Use the same base resolution rules as lib/api.ts:
+ * - if VITE_API_BASE is set, use it
+ * - otherwise same-origin
+ */
+const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
+function apiUrl(path: string) {
+  if (!path.startsWith("/")) path = `/${path}`;
+  return `${API_BASE}${path}`;
+}
+
 async function apiFetch(path: string, init: RequestInit = {}) {
   const token = getToken();
   const headers = new Headers(init.headers || {});
+  headers.set("Accept", "application/json");
   headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const res = await fetch(path, { ...init, headers });
-  const json = await res.json().catch(() => ({}));
+  const res = await fetch(apiUrl(path), { ...init, headers });
+
+  // Safe parse: handle 204 / non-json / html errors without crashing
+  const text = await res.text().catch(() => "");
+  const json = text
+    ? (() => {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return {};
+        }
+      })()
+    : {};
+
   if (!res.ok) {
     const msg =
-      json?.error?.message ||
-      json?.error ||
-      json?.message ||
+      (json as any)?.error?.message ||
+      (json as any)?.error ||
+      (json as any)?.message ||
       `Request failed (${res.status})`;
     throw new Error(typeof msg === "string" ? msg : "Request failed");
   }
@@ -72,7 +89,7 @@ function OutletHomePage() {
     setErr(null);
     try {
       const data = await apiFetch("/api/outlet/sessions");
-      setSessions(data.sessions || []);
+      setSessions((data as any).sessions || []);
     } catch (e: any) {
       setErr(e?.message || "Failed to load sessions");
     } finally {
@@ -90,8 +107,7 @@ function OutletHomePage() {
           visibility,
         }),
       });
-      const s: OutletSession = data.session;
-      // go straight into the session chat
+      const s: OutletSession = (data as any).session;
       nav(`/outlet/${s.id}`);
     } catch (e: any) {
       setErr(e?.message || "Failed to create session");
@@ -106,15 +122,19 @@ function OutletHomePage() {
     <div className="container">
       <div className="card">
         <h2>Counselor’s Office</h2>
-        <div className="sub">
-          Private outlet + AI-guided support. You can choose whether to escalate.
-        </div>
+        <div className="sub">Private outlet + AI-guided support. You can choose whether to escalate.</div>
 
-        {err ? <div className="badge" style={{ marginTop: 8 }}>{err}</div> : null}
+        {err ? (
+          <div className="badge" style={{ marginTop: 8 }}>
+            {err}
+          </div>
+        ) : null}
 
         <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
           <div>
-            <div className="sub" style={{ marginBottom: 6 }}>Start a new session</div>
+            <div className="sub" style={{ marginBottom: 6 }}>
+              Start a new session
+            </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <input
                 className="input"
@@ -154,9 +174,7 @@ function OutletHomePage() {
             </div>
 
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              {sessions.length === 0 && !loading ? (
-                <div className="sub">No sessions yet. Create one above.</div>
-              ) : null}
+              {sessions.length === 0 && !loading ? <div className="sub">No sessions yet. Create one above.</div> : null}
 
               {sessions.map((s) => (
                 <div
@@ -167,9 +185,7 @@ function OutletHomePage() {
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div>
-                      <div style={{ fontWeight: 700 }}>
-                        {s.category ? s.category : "General"}
-                      </div>
+                      <div style={{ fontWeight: 700 }}>{s.category ? s.category : "General"}</div>
                       <div className="sub">
                         {s.status} • {s.visibility} • updated {new Date(s.updatedAt).toLocaleString()}
                       </div>
@@ -194,11 +210,16 @@ function OutletHomePage() {
 }
 
 /**
- * Staff panel is optional + safe:
- * It only loads if you pass ?view=staff and your token role is manager/admin.
- * (This avoids adding role parsing logic here; backend enforces anyway.)
+ * Staff panel:
+ * - hidden by default
+ * - shows if ?staff=1 is in URL
+ * Backend still enforces manager/admin.
  */
 function OutletStaffPanel() {
+  const loc = useLocation();
+  const params = new URLSearchParams(loc.search);
+  const staffEnabled = params.get("staff") === "1";
+
   const [open, setOpen] = React.useState(false);
   const [sessions, setSessions] = React.useState<OutletSession[]>([]);
   const [err, setErr] = React.useState<string | null>(null);
@@ -209,7 +230,7 @@ function OutletStaffPanel() {
     setErr(null);
     try {
       const data = await apiFetch("/api/outlet/sessions?view=staff&limit=200");
-      setSessions(data.sessions || []);
+      setSessions((data as any).sessions || []);
       setOpen(true);
     } catch (e: any) {
       setErr(e?.message || "Could not load staff view (need manager/admin)");
@@ -218,6 +239,8 @@ function OutletStaffPanel() {
       setLoading(false);
     }
   }
+
+  if (!staffEnabled) return null;
 
   return (
     <div>
@@ -235,8 +258,7 @@ function OutletStaffPanel() {
             <div key={s.id} className="card">
               <div style={{ fontWeight: 700 }}>{s.category || "General"}</div>
               <div className="sub">
-                status: {s.status} • visibility: {s.visibility} • updated{" "}
-                {new Date(s.updatedAt).toLocaleString()}
+                status: {s.status} • visibility: {s.visibility} • updated {new Date(s.updatedAt).toLocaleString()}
               </div>
               <div className="sub">sessionId: {s.id}</div>
             </div>
@@ -264,8 +286,8 @@ function OutletSessionPage() {
     setErr(null);
     try {
       const data = await apiFetch(`/api/outlet/sessions/${sessionId}`);
-      setSession(data.session);
-      setMessages(data.messages || []);
+      setSession((data as any).session);
+      setMessages((data as any).messages || []);
     } catch (e: any) {
       setErr(e?.message || "Failed to load session");
     } finally {
@@ -284,12 +306,10 @@ function OutletSessionPage() {
         body: JSON.stringify({ content: text }),
       });
 
-      // Append quickly for snappy UI, then reload to keep in sync
-      const userMessage: OutletMessage | undefined = data.userMessage;
-      const aiMessage: OutletMessage | undefined = data.aiMessage;
+      const userMessage: OutletMessage | undefined = (data as any).userMessage;
+      const aiMessage: OutletMessage | undefined = (data as any).aiMessage;
       setMessages((prev) => [...prev, ...(userMessage ? [userMessage] : []), ...(aiMessage ? [aiMessage] : [])]);
       setContent("");
-      // keep the session status updated (escalated/closed)
       await load();
     } catch (e: any) {
       setErr(e?.message || "Failed to send message");
@@ -317,7 +337,10 @@ function OutletSessionPage() {
   async function close() {
     setErr(null);
     try {
-      await apiFetch(`/api/outlet/sessions/${sessionId}/close`, { method: "POST", body: JSON.stringify({}) });
+      await apiFetch(`/api/outlet/sessions/${sessionId}/close`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
       await load();
     } catch (e: any) {
       setErr(e?.message || "Failed to close session");
@@ -342,21 +365,35 @@ function OutletSessionPage() {
             ) : null}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="btn" onClick={() => nav("/outlet")}>Back</button>
-            <button className="btn" onClick={() => requestEscalation("manager")}>Escalate to Manager</button>
-            <button className="btn" onClick={() => requestEscalation("admin")}>Escalate to Admin</button>
-            <button className="btn" onClick={close}>Close</button>
+            <button className="btn" onClick={() => nav("/outlet")}>
+              Back
+            </button>
+            <button className="btn" onClick={() => requestEscalation("manager")}>
+              Escalate to Manager
+            </button>
+            <button className="btn" onClick={() => requestEscalation("admin")}>
+              Escalate to Admin
+            </button>
+            <button className="btn" onClick={close}>
+              Close
+            </button>
           </div>
         </div>
 
-        {err ? <div className="badge" style={{ marginTop: 10 }}>{err}</div> : null}
-        {loading ? <div className="badge" style={{ marginTop: 10 }}>Loading…</div> : null}
+        {err ? (
+          <div className="badge" style={{ marginTop: 10 }}>
+            {err}
+          </div>
+        ) : null}
+        {loading ? (
+          <div className="badge" style={{ marginTop: 10 }}>
+            Loading…
+          </div>
+        ) : null}
 
         <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
           <div className="card" style={{ maxHeight: 420, overflow: "auto" }}>
-            {messages.length === 0 ? (
-              <div className="sub">No messages yet. Say what’s on your mind.</div>
-            ) : null}
+            {messages.length === 0 ? <div className="sub">No messages yet. Say what’s on your mind.</div> : null}
             {messages.map((m) => (
               <div key={m.id} style={{ marginBottom: 12 }}>
                 <div className="sub" style={{ marginBottom: 4 }}>
@@ -381,9 +418,7 @@ function OutletSessionPage() {
             </button>
           </div>
 
-          <div className="sub">
-            If this is an immediate safety issue, contact local emergency services or your company’s emergency process.
-          </div>
+          <div className="sub">If this is an immediate safety issue, contact local emergency services or your company’s emergency process.</div>
         </div>
       </div>
     </div>
