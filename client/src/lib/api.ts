@@ -108,8 +108,22 @@ function apiUrl(path: string) {
   return `${API_BASE}${path}`;
 }
 
+function bestErrorMessage(data: any): string {
+  const msg =
+    data?.error?.message ??
+    data?.error ??
+    data?.message ??
+    data?.detail ??
+    data?.statusText ??
+    null;
+
+  if (typeof msg === "string" && msg.trim()) return msg.trim();
+  return "Request failed";
+}
+
 async function req<T>(method: string, url: string, body?: any): Promise<T> {
   const token = getToken();
+
   const res = await fetch(apiUrl(url), {
     method,
     headers: {
@@ -120,10 +134,11 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
   });
 
   const data = await res.json().catch(() => ({}));
+
   if (!res.ok) {
-    const msg = (data as any)?.error?.message || (data as any)?.error || (data as any)?.message || "Request failed";
-    throw new Error(typeof msg === "string" ? msg : "Request failed");
+    throw new Error(bestErrorMessage(data));
   }
+
   return data as T;
 }
 
@@ -145,7 +160,11 @@ export function apiDelete<T>(url: string) {
 
 export const api = {
   async register(orgName: string, username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", {
+      orgName,
+      username,
+      password,
+    });
   },
   async login(username: string, password: string) {
     return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
@@ -224,7 +243,10 @@ export const api = {
     return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
   },
   async listNotes(userId: string, limit = 100) {
-    return req<{ notes: UserNote[] }>("GET", `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`);
+    return req<{ notes: UserNote[] }>(
+      "GET",
+      `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`,
+    );
   },
   async addNote(userId: string, note: string) {
     return req<{ note: any }>("POST", `/api/users/${encodeURIComponent(userId)}/notes`, { note });
@@ -241,10 +263,7 @@ export const api = {
     return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
   },
   async outletGetSession(sessionId: string) {
-    return req<{ session: OutletSession; messages: OutletMessage[] }>(
-      "GET",
-      `/api/outlet/sessions/${encodeURIComponent(sessionId)}`,
-    );
+    return req<{ session: OutletSession; messages: OutletMessage[] }>("GET", `/api/outlet/sessions/${encodeURIComponent(sessionId)}`);
   },
   async outletSendMessage(sessionId: string, content: string) {
     return req<{ userMessage: OutletMessage; aiMessage: OutletMessage; riskLevel: number }>(
@@ -261,5 +280,10 @@ export const api = {
   },
   async outletClose(sessionId: string) {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
+  },
+
+  /** Optional: Outlet analytics (manager/admin). Safe to call only if backend exists. */
+  async outletAnalyticsSummary(days = 30) {
+    return req<{ summary: any }>("GET", `/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
 };
