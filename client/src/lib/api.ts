@@ -1,12 +1,5 @@
 import React from "react";
-import {
-  Routes,
-  Route,
-  Navigate,
-  Link,
-  useNavigate,
-  useParams,
-} from "react-router-dom";
+import { Routes, Route, Navigate, Link, useNavigate, useParams } from "react-router-dom";
 import { api, getToken, setToken } from "../lib/api";
 import AuthPage from "./AuthPage";
 import DashboardPage from "./DashboardPage";
@@ -41,20 +34,21 @@ function OutletHomePage() {
   const nav = useNavigate();
   const [sessions, setSessions] = React.useState<OutletSession[]>([]);
   const [category, setCategory] = React.useState("");
-  const [visibility, setVisibility] =
-    React.useState<"private" | "manager" | "admin">("private");
+  const [visibility, setVisibility] = React.useState<"private" | "manager" | "admin">("private");
   const [err, setErr] = React.useState<string | null>(null);
 
   async function load() {
+    setErr(null);
     try {
       const res = await api.outletListMySessions();
-      setSessions(res.sessions);
+      setSessions(res.sessions || []);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || "Failed to load sessions");
     }
   }
 
   async function create() {
+    setErr(null);
     try {
       const res = await api.outletCreateSession({
         category: category.trim() || null,
@@ -62,7 +56,7 @@ function OutletHomePage() {
       });
       nav(`/outlet/${res.session.id}`);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || "Failed to create session");
     }
   }
 
@@ -75,16 +69,15 @@ function OutletHomePage() {
       <div className="card">
         <h2>Counselor’s Office</h2>
         <div className="sub">
-          A private, AI-guided space to process concerns while you’re still
-          employed.
+          A private, AI-guided space to process concerns while you’re still employed.
         </div>
 
-        {err && <div className="badge">{err}</div>}
+        {err ? <div className="badge">{err}</div> : null}
 
         <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
           <input
             className="input"
-            placeholder="Category (burnout, pay, schedule, conflict…) "
+            placeholder="Category (burnout, pay, schedule, conflict…)"
             value={category}
             onChange={(e) => setCategory(e.target.value)}
           />
@@ -100,9 +93,16 @@ function OutletHomePage() {
           <button className="btn" onClick={create}>
             Start
           </button>
+          <button className="btn" onClick={load}>
+            Refresh
+          </button>
         </div>
 
         <hr />
+
+        {sessions.length === 0 ? (
+          <div className="sub">No sessions yet. Create one above.</div>
+        ) : null}
 
         {sessions.map((s) => (
           <div
@@ -124,74 +124,109 @@ function OutletHomePage() {
 
 function OutletSessionPage() {
   const { id } = useParams();
-  const sessionId = String(id);
+  const sessionId = String(id || "");
   const nav = useNavigate();
 
   const [session, setSession] = React.useState<OutletSession | null>(null);
   const [messages, setMessages] = React.useState<OutletMessage[]>([]);
   const [content, setContent] = React.useState("");
   const [err, setErr] = React.useState<string | null>(null);
+  const [sending, setSending] = React.useState(false);
 
   async function load() {
+    setErr(null);
     try {
       const res = await api.outletGetSession(sessionId);
       setSession(res.session);
-      setMessages(res.messages);
+      setMessages(res.messages || []);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || "Failed to load session");
     }
   }
 
   async function send() {
-    if (!content.trim()) return;
+    const text = content.trim();
+    if (!text) return;
+    setSending(true);
+    setErr(null);
     try {
-      await api.outletSendMessage(sessionId, content);
+      await api.outletSendMessage(sessionId, text);
       setContent("");
       await load();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || "Failed to send message");
+    } finally {
+      setSending(false);
     }
   }
 
   async function escalate(role: "manager" | "admin") {
-    await api.outletEscalate(sessionId, {
-      escalatedToRole: role,
-      reason: "Employee requested escalation",
-    });
-    await load();
+    setErr(null);
+    try {
+      await api.outletEscalate(sessionId, {
+        escalatedToRole: role,
+        reason: "Employee requested escalation",
+      });
+      await load();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to escalate");
+    }
   }
 
   async function close() {
-    await api.outletClose(sessionId);
-    await load();
+    setErr(null);
+    try {
+      await api.outletClose(sessionId);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to close session");
+    }
   }
 
   React.useEffect(() => {
+    if (!sessionId) return;
     load();
   }, [sessionId]);
 
   return (
     <div className="container">
       <div className="card">
-        <button className="btn" onClick={() => nav("/outlet")}>
-          ← Back
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn" onClick={() => nav("/outlet")}>
+            ← Back
+          </button>
+          <button className="btn" onClick={() => escalate("manager")}>
+            Escalate to Manager
+          </button>
+          <button className="btn" onClick={() => escalate("admin")}>
+            Escalate to Admin
+          </button>
+          <button className="btn" onClick={close}>
+            Close
+          </button>
+        </div>
 
-        {session && (
+        {session ? (
           <>
-            <h2>{session.category || "General"}</h2>
+            <h2 style={{ marginTop: 12 }}>{session.category || "General"}</h2>
             <div className="sub">
               {session.status} • {session.visibility}
             </div>
           </>
-        )}
+        ) : null}
 
-        {err && <div className="badge">{err}</div>}
+        {err ? <div className="badge" style={{ marginTop: 10 }}>{err}</div> : null}
 
-        <div className="card" style={{ maxHeight: 400, overflow: "auto" }}>
+        <div className="card" style={{ maxHeight: 400, overflow: "auto", marginTop: 12 }}>
+          {messages.length === 0 ? (
+            <div className="sub">No messages yet. Say what’s on your mind.</div>
+          ) : null}
+
           {messages.map((m) => (
             <div key={m.id} style={{ marginBottom: 12 }}>
-              <b>{m.sender === "ai" ? "AI" : "You"}</b>
+              <div className="sub" style={{ marginBottom: 4 }}>
+                <b>{m.sender === "ai" ? "AI" : "You"}</b> • {new Date(m.createdAt).toLocaleString()}
+              </div>
               <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
             </div>
           ))}
@@ -203,21 +238,17 @@ function OutletSessionPage() {
           value={content}
           onChange={(e) => setContent(e.target.value)}
           placeholder="Say what’s on your mind…"
+          style={{ marginTop: 10 }}
         />
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn" onClick={send}>
-            Send
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <button className="btn" onClick={send} disabled={sending || !content.trim()}>
+            {sending ? "Sending…" : "Send"}
           </button>
-          <button className="btn" onClick={() => escalate("manager")}>
-            Escalate to Manager
-          </button>
-          <button className="btn" onClick={() => escalate("admin")}>
-            Escalate to Admin
-          </button>
-          <button className="btn" onClick={close}>
-            Close
-          </button>
+        </div>
+
+        <div className="sub" style={{ marginTop: 10 }}>
+          If this is an immediate safety issue, contact local emergency services or your company’s emergency process.
         </div>
       </div>
     </div>
@@ -233,18 +264,18 @@ function Topbar() {
     <div className="container">
       <div className="card hdr">
         <h1>Level Up</h1>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Link className="badge" to="/">
             About
           </Link>
           <Link className="badge" to="/dashboard">
             Dashboard
           </Link>
-          {token && (
+          {token ? (
             <Link className="badge" to="/outlet">
               Counselor’s Office
             </Link>
-          )}
+          ) : null}
           {token ? (
             <button
               className="btn"
