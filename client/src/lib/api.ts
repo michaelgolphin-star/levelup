@@ -1,3 +1,5 @@
+// client/src/lib/api.ts (FULL REPLACEMENT)
+
 export type Role = "user" | "manager" | "admin";
 
 export type AuthUser = { id: string; username: string; orgId: string; role: Role };
@@ -51,8 +53,21 @@ export type Habit = {
 
 export type OrgSummary = {
   days: number;
-  overall: { moodAvg: number | null; energyAvg: number | null; stressAvg: number | null; checkins: number; users: number };
-  byDay: Array<{ dayKey: string; moodAvg: number; energyAvg: number; stressAvg: number; checkins: number; users: number }>;
+  overall: {
+    moodAvg: number | null;
+    energyAvg: number | null;
+    stressAvg: number | null;
+    checkins: number;
+    users: number;
+  };
+  byDay: Array<{
+    dayKey: string;
+    moodAvg: number;
+    energyAvg: number;
+    stressAvg: number;
+    checkins: number;
+    users: number;
+  }>;
   risk: Array<{ userId: string; username: string; moodAvg: number; stressAvg: number; count: number }>;
 };
 
@@ -88,13 +103,28 @@ export type OutletMessage = {
 };
 
 const TOKEN_KEY = "levelup_token";
+const LEGACY_TOKEN_KEYS = ["token", "levelupToken", "jwt"] as const;
 
+/** Read token (supports legacy keys for older builds) */
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
+  const t = localStorage.getItem(TOKEN_KEY);
+  if (t) return t;
+
+  for (const k of LEGACY_TOKEN_KEYS) {
+    const v = localStorage.getItem(k);
+    if (v) return v;
+  }
+  return null;
 }
+
+/** Write token + keep storage clean */
 export function setToken(t: string | null) {
-  if (!t) localStorage.removeItem(TOKEN_KEY);
-  else localStorage.setItem(TOKEN_KEY, t);
+  if (!t) {
+    localStorage.removeItem(TOKEN_KEY);
+    for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
+    return;
+  }
+  localStorage.setItem(TOKEN_KEY, t);
 }
 
 /**
@@ -102,21 +132,14 @@ export function setToken(t: string | null) {
  *   VITE_API_BASE=https://your-api-domain
  * Defaults to same-origin.
  */
-const API_BASE = (import.meta as any)?.env?.VITE_API_BASE?.replace(/\/+$/, "") || "";
+const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
 function apiUrl(path: string) {
   if (!path.startsWith("/")) path = `/${path}`;
   return `${API_BASE}${path}`;
 }
 
 function bestErrorMessage(data: any): string {
-  const msg =
-    data?.error?.message ??
-    data?.error ??
-    data?.message ??
-    data?.detail ??
-    data?.statusText ??
-    null;
-
+  const msg = data?.error?.message ?? data?.error ?? data?.message ?? data?.detail ?? data?.statusText ?? null;
   if (typeof msg === "string" && msg.trim()) return msg.trim();
   return "Request failed";
 }
@@ -127,13 +150,16 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method,
     headers: {
+      Accept: "application/json",
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  const data = await res.json().catch(() => ({}));
+  // handle 204 / non-json gracefully
+  const text = await res.text().catch(() => "");
+  const data = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
 
   if (!res.ok) {
     throw new Error(bestErrorMessage(data));
@@ -160,11 +186,7 @@ export function apiDelete<T>(url: string) {
 
 export const api = {
   async register(orgName: string, username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", {
-      orgName,
-      username,
-      password,
-    });
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
   },
   async login(username: string, password: string) {
     return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
@@ -236,10 +258,7 @@ export const api = {
   async getProfile(userId: string) {
     return req<{ profile: UserProfile }>("GET", `/api/users/${encodeURIComponent(userId)}/profile`);
   },
-  async updateProfile(
-    userId: string,
-    payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] },
-  ) {
+  async updateProfile(userId: string, payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] }) {
     return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
   },
   async listNotes(userId: string, limit = 100) {
@@ -263,7 +282,10 @@ export const api = {
     return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
   },
   async outletGetSession(sessionId: string) {
-    return req<{ session: OutletSession; messages: OutletMessage[] }>("GET", `/api/outlet/sessions/${encodeURIComponent(sessionId)}`);
+    return req<{ session: OutletSession; messages: OutletMessage[] }>(
+      "GET",
+      `/api/outlet/sessions/${encodeURIComponent(sessionId)}`,
+    );
   },
   async outletSendMessage(sessionId: string, content: string) {
     return req<{ userMessage: OutletMessage; aiMessage: OutletMessage; riskLevel: number }>(
@@ -272,10 +294,7 @@ export const api = {
       { content },
     );
   },
-  async outletEscalate(
-    sessionId: string,
-    payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null },
-  ) {
+  async outletEscalate(sessionId: string, payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null }) {
     return req<{ escalation: any }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/escalate`, payload);
   },
   async outletClose(sessionId: string) {
