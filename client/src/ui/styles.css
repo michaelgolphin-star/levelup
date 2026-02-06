@@ -270,3 +270,94 @@ h3{ font-size: 15px; margin: 0 0 10px 0; }
 }
 .toast.bad{ border-color: rgba(251,113,133,.35); background: rgba(251,113,133,.10); }
 .toast.good{ border-color: rgba(52,211,153,.35); background: rgba(52,211,153,.10); }
+
+/* -------------------------------
+   Topbar (App.tsx uses these)
+-------------------------------- */
+.topWrap{
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(10px);
+}
+.topHdr{
+  border-bottom: none;
+}
+.topTitle{
+  font-weight: 900;
+  letter-spacing: .2px;
+  font-size: 16px;
+}
+.topNav{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.topLink{
+  border: 1px solid var(--border2);
+  background: rgba(255,255,255,.04);
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--text);
+  transition: background .15s ease, border-color .15s ease;
+}
+.topLink:hover{
+  background: rgba(255,255,255,.08);
+  text-decoration: none;
+}
+.topLink.active{
+  background: rgba(96,165,250,.16);
+  border-color: rgba(96,165,250,.35);
+}
+
+/* -------------------------------
+   Dashboard helpers
+-------------------------------- */
+.dashTabs{
+  display:flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.dashChips{
+  display:flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip{
+  border: 1px solid var(--border2);
+  background: rgba(255,255,255,.05);
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, transform .06s ease;
+}
+.chip:hover{ background: rgba(255,255,255,.08); }
+.chip:active{ transform: translateY(1px); }
+.chip.active{
+  background: rgba(52,211,153,.12);
+  border-color: rgba(52,211,153,.35);
+}
+
+.dashSliders{
+  display:grid;
+  gap: 10px;
+}
+
+.dashSliderRow{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.dashSlider{
+  width: 100%;
+  accent-color: var(--accent);
+}
