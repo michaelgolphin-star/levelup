@@ -125,6 +125,8 @@ export function setToken(t: string | null) {
     return;
   }
   localStorage.setItem(TOKEN_KEY, t);
+  // keep storage clean if user had old builds
+  for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
 }
 
 /**
@@ -159,7 +161,15 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
 
   // handle 204 / non-json gracefully
   const text = await res.text().catch(() => "");
-  const data = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
+  const data = text
+    ? (() => {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return {};
+        }
+      })()
+    : {};
 
   if (!res.ok) {
     throw new Error(bestErrorMessage(data));
@@ -186,7 +196,11 @@ export function apiDelete<T>(url: string) {
 
 export const api = {
   async register(orgName: string, username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", {
+      orgName,
+      username,
+      password,
+    });
   },
   async login(username: string, password: string) {
     return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
@@ -238,7 +252,11 @@ export const api = {
     return req<{ invite: InviteInfo; org: Org }>("GET", `/api/invites/${encodeURIComponent(token)}`);
   },
   async acceptInvite(token: string, payload: { username: string; password: string }) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", `/api/invites/${encodeURIComponent(token)}/accept`, payload);
+    return req<{ token: string; user: AuthUser; org: Org }>(
+      "POST",
+      `/api/invites/${encodeURIComponent(token)}/accept`,
+      payload,
+    );
   },
 
   async requestPasswordReset(username: string) {
@@ -258,7 +276,10 @@ export const api = {
   async getProfile(userId: string) {
     return req<{ profile: UserProfile }>("GET", `/api/users/${encodeURIComponent(userId)}/profile`);
   },
-  async updateProfile(userId: string, payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] }) {
+  async updateProfile(
+    userId: string,
+    payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] },
+  ) {
     return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
   },
   async listNotes(userId: string, limit = 100) {
@@ -279,7 +300,10 @@ export const api = {
     return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?limit=${encodeURIComponent(String(limit))}`);
   },
   async outletListStaffSessions(limit = 200) {
-    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
+    return req<{ sessions: OutletSession[] }>(
+      "GET",
+      `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`,
+    );
   },
   async outletGetSession(sessionId: string) {
     return req<{ session: OutletSession; messages: OutletMessage[] }>(
@@ -294,7 +318,10 @@ export const api = {
       { content },
     );
   },
-  async outletEscalate(sessionId: string, payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null }) {
+  async outletEscalate(
+    sessionId: string,
+    payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null },
+  ) {
     return req<{ escalation: any }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/escalate`, payload);
   },
   async outletClose(sessionId: string) {
