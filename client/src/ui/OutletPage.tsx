@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
 import { api, apiGet } from "../lib/api";
@@ -24,6 +24,13 @@ function statusLabel(s: OutletStatus) {
   return "Open";
 }
 
+function formatTs(iso: any) {
+  if (!iso) return "";
+  const d = new Date(String(iso));
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
+
 export function OutletHomePage() {
   const nav = useNavigate();
 
@@ -40,6 +47,8 @@ export function OutletHomePage() {
   // Create form
   const [category, setCategory] = useState("");
   const [visibility, setVisibility] = useState<OutletVisibility>("private");
+
+  const categoryRef = useRef<HTMLInputElement | null>(null);
 
   async function loadAuth() {
     const me = await apiGet<{ auth: AuthPayload }>("/api/me");
@@ -95,6 +104,12 @@ export function OutletHomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
+  // Option A polish: focus the Category field when this page opens
+  useEffect(() => {
+    const t = setTimeout(() => categoryRef.current?.focus(), 50);
+    return () => clearTimeout(t);
+  }, []);
+
   const viewLabel = useMemo(() => {
     if (view === "staff") return "Staff view";
     return "My sessions";
@@ -130,10 +145,14 @@ export function OutletHomePage() {
                 <div className="col">
                   <div className="label">Category (optional)</div>
                   <input
+                    ref={categoryRef}
                     className="input"
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
                     placeholder="pay, scheduling, conflict, safety…"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") createSession();
+                    }}
                   />
                 </div>
 
@@ -213,6 +232,7 @@ export function OutletHomePage() {
               <div className="list">
                 {sessions.map((s) => {
                   const rb = riskBadge(Number(s.riskLevel || 0));
+                  const last = formatTs(s.lastMessageAt || s.updatedAt || s.createdAt);
                   return (
                     <div
                       key={s.id}
@@ -220,13 +240,22 @@ export function OutletHomePage() {
                       onClick={() => nav(`/outlet/${s.id}`)}
                       role="button"
                       tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") nav(`/outlet/${s.id}`);
+                      }}
                     >
                       <div className="listTop">
                         <div>
                           <div className="listTitle">{s.category ? s.category : "General"}</div>
                           <div className="small">
-                            {statusLabel(s.status)} • {visLabel(s.visibility)} •{" "}
-                            {new Date(s.createdAt).toLocaleString()}
+                            {statusLabel(s.status)} • {visLabel(s.visibility)} • Created{" "}
+                            {formatTs(s.createdAt)}
+                            {last ? (
+                              <>
+                                {" "}
+                                • Last activity {last}
+                              </>
+                            ) : null}
                           </div>
                         </div>
 
@@ -272,6 +301,12 @@ export function OutletSessionPage() {
   const [assignToUserId, setAssignToUserId] = useState("");
   const [reason, setReason] = useState("");
 
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [escalating, setEscalating] = useState(false);
+
+  const messageRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
   const isOwner = !!(auth?.userId && session?.userId && auth.userId === session.userId);
   const canEscalate = isOwner || isStaff;
   const canClose = isOwner || isStaff;
@@ -289,6 +324,7 @@ export function OutletSessionPage() {
       const r = await api.outletGetSession(id);
       setSession(r.session);
       setMessages(r.messages || []);
+      setConfirmClose(false);
     } catch (e: any) {
       setToast({ type: "bad", text: e.message || "Failed to load session." });
       setTimeout(() => nav("/outlet"), 350);
@@ -320,7 +356,10 @@ export function OutletSessionPage() {
 
   async function escalate() {
     if (!id || !canEscalate) return;
+    if (session?.status === "escalated") return;
+
     setToast(null);
+    setEscalating(true);
     try {
       await api.outletEscalate(id, {
         escalatedToRole: escalateTo,
@@ -331,6 +370,8 @@ export function OutletSessionPage() {
       await load();
     } catch (e: any) {
       setToast({ type: "bad", text: e.message || "Escalation failed." });
+    } finally {
+      setEscalating(false);
     }
   }
 
@@ -358,7 +399,23 @@ export function OutletSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Option A polish: focus the message box for the owner, and scroll chat to bottom
+  useEffect(() => {
+    if (!loading && isOwner && session?.status !== "closed") {
+      const t = setTimeout(() => messageRef.current?.focus(), 50);
+      return () => clearTimeout(t);
+    }
+  }, [loading, isOwner, session?.status]);
+
+  useEffect(() => {
+    if (!loading) {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [loading, messages.length]);
+
   const rb = riskBadge(Number(session?.riskLevel || 0));
+  const isClosed = session?.status === "closed";
+  const isEscalated = session?.status === "escalated";
 
   return (
     <div className="container">
@@ -412,6 +469,7 @@ export function OutletSessionPage() {
                       </div>
                     ))}
                     {!messages.length ? <div className="small">No messages yet.</div> : null}
+                    <div ref={chatEndRef} />
                   </div>
                 </div>
 
@@ -426,26 +484,31 @@ export function OutletSessionPage() {
                     <div className="col">
                       <div className="label">Message</div>
                       <textarea
+                        ref={messageRef}
                         className="textarea"
                         rows={3}
                         placeholder="Type what’s on your mind…"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        disabled={!isOwner || sending || session.status === "closed"}
+                        disabled={!isOwner || sending || isClosed}
+                        onKeyDown={(e) => {
+                          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") send();
+                        }}
                       />
+                      {isOwner && !isClosed ? (
+                        <div className="small" style={{ marginTop: 6 }}>
+                          Tip: Ctrl/⌘ + Enter to send
+                        </div>
+                      ) : null}
                     </div>
                     <div className="col" style={{ flexBasis: 160 }}>
-                      <button
-                        className="btn primary"
-                        onClick={send}
-                        disabled={!isOwner || sending || !input.trim() || session.status === "closed"}
-                      >
+                      <button className="btn primary" onClick={send} disabled={!isOwner || sending || !input.trim() || isClosed}>
                         {sending ? "Sending…" : "Send"}
                       </button>
                     </div>
                   </div>
 
-                  {session.status === "closed" ? (
+                  {isClosed ? (
                     <div className="small" style={{ marginTop: 10 }}>
                       This session is closed. You can start a new session anytime.
                     </div>
@@ -485,7 +548,7 @@ export function OutletSessionPage() {
                           className="select"
                           value={escalateTo}
                           onChange={(e) => setEscalateTo(e.target.value as any)}
-                          disabled={!canEscalate || session.status === "closed"}
+                          disabled={!canEscalate || isClosed || isEscalated || escalating}
                         >
                           <option value="manager">manager</option>
                           <option value="admin">admin</option>
@@ -499,7 +562,7 @@ export function OutletSessionPage() {
                           value={assignToUserId}
                           onChange={(e) => setAssignToUserId(e.target.value)}
                           placeholder="(optional) paste a staff userId"
-                          disabled={!canEscalate || session.status === "closed"}
+                          disabled={!canEscalate || isClosed || isEscalated || escalating}
                         />
                       </div>
                     </div>
@@ -512,22 +575,48 @@ export function OutletSessionPage() {
                         value={reason}
                         onChange={(e) => setReason(e.target.value)}
                         placeholder="Short reason for escalation…"
-                        disabled={!canEscalate || session.status === "closed"}
+                        disabled={!canEscalate || isClosed || isEscalated || escalating}
                       />
                     </div>
 
                     <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-                      <button className="btn primary" onClick={escalate} disabled={!canEscalate || session.status === "closed"}>
-                        Escalate
+                      <button
+                        className="btn primary"
+                        onClick={escalate}
+                        disabled={!canEscalate || isClosed || isEscalated || escalating}
+                      >
+                        {isEscalated ? "Escalated" : escalating ? "Escalating…" : "Escalate"}
                       </button>
-                      <button className="btn danger" onClick={closeSession} disabled={!canClose || session.status === "closed"}>
-                        Close session
-                      </button>
+
+                      {!confirmClose ? (
+                        <button
+                          className="btn danger"
+                          onClick={() => setConfirmClose(true)}
+                          disabled={!canClose || isClosed}
+                        >
+                          Close session
+                        </button>
+                      ) : (
+                        <>
+                          <button className="btn danger" onClick={closeSession} disabled={!canClose || isClosed}>
+                            Confirm close
+                          </button>
+                          <button className="btn" onClick={() => setConfirmClose(false)} disabled={isClosed}>
+                            Cancel
+                          </button>
+                        </>
+                      )}
                     </div>
 
                     {!canEscalate ? (
                       <div className="small" style={{ marginTop: 10 }}>
                         You don’t have permission to escalate this session.
+                      </div>
+                    ) : null}
+
+                    {isEscalated ? (
+                      <div className="small" style={{ marginTop: 10 }}>
+                        This session is already escalated. (Prevents double-escalation.)
                       </div>
                     ) : null}
                   </div>
