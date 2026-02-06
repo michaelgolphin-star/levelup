@@ -1,6 +1,6 @@
 // client/src/ui/App.tsx (FULL REPLACEMENT)
 import React from "react";
-import { Routes, Route, Navigate, Link, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, Link, useNavigate, useLocation } from "react-router-dom";
 import { getToken, setToken } from "../lib/api";
 
 import AuthPage from "./AuthPage";
@@ -19,46 +19,52 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 function Topbar() {
   const nav = useNavigate();
+  const loc = useLocation();
   const token = getToken();
 
+  const isActive = (path: string) =>
+    loc.pathname === path || (path !== "/" && loc.pathname.startsWith(path));
+
   return (
-    <div className="bg-gradient-to-b from-slate-950 to-emerald-950 text-white">
-      <div className="mx-auto max-w-5xl px-4 pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div>
-            <div className="text-xl font-semibold">Level Up</div>
-            <div className="mt-1 text-sm text-white/60">Daily structure • habits • honest reflection</div>
-          </div>
+    <div className="topWrap">
+      <div className="container" style={{ paddingTop: 16 }}>
+        <div className="card">
+          <div className="hdr topHdr">
+            <div>
+              <div className="topTitle">Level Up</div>
+              <div className="sub">Daily structure • habits • honest reflection</div>
+            </div>
 
-          <div className="flex items-center gap-3">
-            <Link to="/about" className="text-sm text-white/70 hover:text-white">
-              About
-            </Link>
-
-            {token ? (
-              <>
-                <Link to="/dashboard" className="text-sm text-white/70 hover:text-white">
-                  Dashboard
-                </Link>
-                <Link to="/outlet" className="text-sm text-white/70 hover:text-white">
-                  Counselor’s Office
-                </Link>
-
-                <button
-                  className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium transition border border-white/10 bg-white/10 hover:bg-white/15 text-white"
-                  onClick={() => {
-                    setToken(null);
-                    nav("/login");
-                  }}
-                >
-                  Log out
-                </button>
-              </>
-            ) : (
-              <Link to="/login" className="text-sm text-white/70 hover:text-white">
-                Log in
+            <div className="topNav">
+              <Link className={`topLink ${isActive("/about") ? "active" : ""}`} to="/about">
+                About
               </Link>
-            )}
+
+              {token ? (
+                <>
+                  <Link className={`topLink ${isActive("/dashboard") ? "active" : ""}`} to="/dashboard">
+                    Dashboard
+                  </Link>
+                  <Link className={`topLink ${isActive("/outlet") ? "active" : ""}`} to="/outlet">
+                    Counselor’s Office
+                  </Link>
+
+                  <button
+                    className="btn primary"
+                    onClick={() => {
+                      setToken(null);
+                      nav("/login");
+                    }}
+                  >
+                    Log out
+                  </button>
+                </>
+              ) : (
+                <Link className={`topLink ${isActive("/login") ? "active" : ""}`} to="/login">
+                  Log in
+                </Link>
+              )}
+            </div>
           </div>
         </div>
       </div>
