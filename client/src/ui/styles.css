@@ -361,3 +361,44 @@ h3{ font-size: 15px; margin: 0 0 10px 0; }
   width: 100%;
   accent-color: var(--accent);
 }
+
+/* KPI row layout */
+.kpiRow{
+  display:grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 760px){
+  .kpiRow{ grid-template-columns: repeat(3, 1fr); }
+}
+@media (min-width: 1040px){
+  .kpiRow{ grid-template-columns: repeat(5, 1fr); }
+}
+
+/* Mini table */
+.miniTableWrap{
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.16);
+}
+.miniTable{
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 560px;
+}
+.miniTable th,
+.miniTable td{
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.miniTable th{
+  color: var(--muted);
+  font-weight: 800;
+}
+.miniTable tr:last-child td{
+  border-bottom: none;
+}
