@@ -16,12 +16,12 @@ if (!DATABASE_URL) {
   throw new Error("DATABASE_URL is not set. Add Railway Postgres and set DATABASE_URL.");
 }
 
-// Railway Postgres generally works with ssl enabled in many environments;
-// but some local/dev URLs don't. We use a conservative default:
-// - if PGSSLMODE=require or the URL includes ?sslmode=require => ssl on
+// SSL behavior:
+// - if PGSSLMODE=require OR URL includes sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
+  DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -50,6 +50,14 @@ function toInt(v: any, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeTags(tags: any): string[] {
+  if (!Array.isArray(tags)) return [];
+  return tags
+    .map((t) => String(t ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
 export type OutletStatus = "open" | "escalated" | "closed";
@@ -70,7 +78,6 @@ function normalizeStatus(v: any): OutletStatus {
 }
 
 export async function ensureDb() {
-  // Tables
   await q(`
     CREATE TABLE IF NOT EXISTS orgs (
       id TEXT PRIMARY KEY,
@@ -154,20 +161,10 @@ export async function ensureDb() {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
-      -- employee-chosen visibility
-      -- private: only employee (and AI) sees it
-      -- manager: manager/admin can see it
-      -- admin: admin can see it
       visibility TEXT NOT NULL DEFAULT 'private',
-
-      -- broad category tag (burnout, scheduling, conflict, pay, safety, etc.)
       category TEXT,
-
-      -- workflow
-      status TEXT NOT NULL DEFAULT 'open', -- open | escalated | closed
-      risk_level INTEGER NOT NULL DEFAULT 0, -- 0=normal, higher=more urgent routing
-
+      status TEXT NOT NULL DEFAULT 'open',
+      risk_level INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -176,11 +173,8 @@ export async function ensureDb() {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL REFERENCES outlet_sessions(id) ON DELETE CASCADE,
-
-      -- sender: 'user' or 'ai'
       sender TEXT NOT NULL,
       content TEXT NOT NULL,
-
       created_at TEXT NOT NULL
     );
 
@@ -188,17 +182,13 @@ export async function ensureDb() {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL REFERENCES outlet_sessions(id) ON DELETE CASCADE,
-
-      -- who it is escalated to
-      escalated_to_role TEXT NOT NULL, -- manager | admin
+      escalated_to_role TEXT NOT NULL,
       assigned_to_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-
       reason TEXT,
       created_at TEXT NOT NULL
     );
   `);
 
-  // Indexes
   await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
@@ -226,14 +216,19 @@ export async function ensureDb() {
 /** Orgs */
 export async function createOrg(name: string) {
   const org = { id: nanoid(), name: name.trim(), createdAt: nowIso() };
-  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [org.id, org.name, org.createdAt]);
+  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [
+    org.id,
+    org.name,
+    org.createdAt,
+  ]);
   return org;
 }
 
 export async function getOrg(orgId: string) {
-  const rows = await q<{ id: string; name: string; created_at: string }>("SELECT id, name, created_at FROM orgs WHERE id = $1", [
-    orgId,
-  ]);
+  const rows = await q<{ id: string; name: string; created_at: string }>(
+    "SELECT id, name, created_at FROM orgs WHERE id = $1",
+    [orgId],
+  );
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, name: row.name, createdAt: row.created_at };
@@ -288,9 +283,10 @@ export async function getUserById(userId: string) {
 }
 
 export async function listUsers(orgId: string) {
-  const rows = await q<any>("SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC", [
-    orgId,
-  ]);
+  const rows = await q<any>(
+    "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
+    [orgId],
+  );
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
@@ -320,6 +316,8 @@ export async function createCheckIn(params: {
   tags?: string[];
 }) {
   const ts = params.ts || nowIso();
+  const tags = normalizeTags(params.tags);
+
   const checkin = {
     id: nanoid(),
     orgId: params.orgId,
@@ -330,7 +328,8 @@ export async function createCheckIn(params: {
     energy: params.energy,
     stress: params.stress,
     note: params.note ?? null,
-    tags: params.tags ?? [],
+    tags,
+    tagsJson: JSON.stringify(tags),
     createdAt: nowIso(),
   };
 
@@ -347,7 +346,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      JSON.stringify(checkin.tags),
+      checkin.tagsJson, // jsonb cast works fine from string
       checkin.createdAt,
     ],
   );
@@ -373,21 +372,26 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
 
   args.push(limit);
   const sql = `SELECT * FROM checkins WHERE ${where.join(" AND ")} ORDER BY ts DESC LIMIT $${i}`;
-
   const rows = await q<any>(sql, args);
-  return rows.map((r) => ({
-    id: r.id,
-    orgId: r.org_id,
-    userId: r.user_id,
-    ts: r.ts,
-    dayKey: r.day_key,
-    mood: r.mood,
-    energy: r.energy,
-    stress: r.stress,
-    note: r.note,
-    tagsJson: JSON.stringify(r.tags_json ?? []),
-    createdAt: r.created_at,
-  }));
+
+  return rows.map((r) => {
+    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
+    const tags = normalizeTags(tagsArr);
+    return {
+      id: r.id,
+      orgId: r.org_id,
+      userId: r.user_id,
+      ts: r.ts,
+      dayKey: r.day_key,
+      mood: r.mood,
+      energy: r.energy,
+      stress: r.stress,
+      note: r.note,
+      tags, // ✅ array for older UIs
+      tagsJson: JSON.stringify(tags), // ✅ string for newer typings
+      createdAt: r.created_at,
+    };
+  });
 }
 
 export async function deleteCheckIn(orgId: string, userId: string, checkInId: string) {
@@ -421,8 +425,11 @@ export async function createHabit(params: { orgId: string; userId: string; name:
 
 export async function listHabits(params: { orgId: string; userId: string; includeArchived?: boolean }) {
   const includeArchived = !!params.includeArchived;
-  const sql = `SELECT * FROM habits WHERE org_id = $1 AND user_id = $2 ${includeArchived ? "" : "AND archived_at IS NULL"} ORDER BY created_at DESC`;
+  const sql = `SELECT * FROM habits WHERE org_id = $1 AND user_id = $2 ${
+    includeArchived ? "" : "AND archived_at IS NULL"
+  } ORDER BY created_at DESC`;
   const rows = await q<any>(sql, [params.orgId, params.userId]);
+
   return rows.map((r) => ({
     id: r.id,
     orgId: r.org_id,
@@ -588,14 +595,10 @@ export async function createInvite(params: { orgId: string; role: Role; expiresA
     createdBy: params.createdBy,
   };
 
-  await q("INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)", [
-    invite.token,
-    invite.orgId,
-    invite.role,
-    invite.expiresAt,
-    invite.createdAt,
-    invite.createdBy,
-  ]);
+  await q(
+    "INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
+    [invite.token, invite.orgId, invite.role, invite.expiresAt, invite.createdAt, invite.createdBy],
+  );
 
   return invite;
 }
@@ -615,9 +618,10 @@ export async function getInvite(token: string) {
 }
 
 export async function deleteInvite(token: string) {
-  const rows = await q<{ count: string }>("WITH del AS (DELETE FROM invites WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del", [
-    token,
-  ]);
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM invites WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [token],
+  );
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
@@ -633,14 +637,10 @@ export async function createPasswordReset(params: { orgId: string; userId: strin
     createdBy: params.createdBy,
   };
 
-  await q("INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)", [
-    reset.token,
-    reset.userId,
-    reset.orgId,
-    reset.expiresAt,
-    reset.createdAt,
-    reset.createdBy,
-  ]);
+  await q(
+    "INSERT INTO password_resets (token, user_id, org_id, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
+    [reset.token, reset.userId, reset.orgId, reset.expiresAt, reset.createdAt, reset.createdBy],
+  );
 
   return reset;
 }
@@ -660,18 +660,19 @@ export async function getPasswordReset(token: string) {
 }
 
 export async function deletePasswordReset(token: string) {
-  const rows = await q<{ count: string }>("WITH del AS (DELETE FROM password_resets WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del", [
-    token,
-  ]);
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM password_resets WHERE token = $1 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [token],
+  );
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
 export async function setUserPassword(userId: string, password: string) {
   const passwordHash = hashPassword(password);
-  const rows = await q<{ count: string }>("WITH upd AS (UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING 1) SELECT COUNT(*)::text as count FROM upd", [
-    passwordHash,
-    userId,
-  ]);
+  const rows = await q<{ count: string }>(
+    "WITH upd AS (UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING 1) SELECT COUNT(*)::text as count FROM upd",
+    [passwordHash, userId],
+  );
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
@@ -679,6 +680,7 @@ export async function setUserPassword(userId: string, password: string) {
 export async function getUserProfile(orgId: string, userId: string) {
   const rows = await q<any>("SELECT * FROM user_profiles WHERE org_id = $1 AND user_id = $2", [orgId, userId]);
   const row = rows[0];
+
   if (!row) {
     const now = nowIso();
     await q(
@@ -687,16 +689,26 @@ export async function getUserProfile(orgId: string, userId: string) {
        ON CONFLICT (user_id) DO NOTHING`,
       [userId, orgId, null, null, null, JSON.stringify([]), now, now],
     );
-    return { userId, orgId, fullName: null, email: null, phone: null, tagsJson: "[]", createdAt: now, updatedAt: now };
+    return {
+      userId,
+      orgId,
+      fullName: null,
+      email: null,
+      phone: null,
+      tagsJson: "[]",
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
+  const tagsArr = Array.isArray(row.tags_json) ? row.tags_json : [];
   return {
     userId: row.user_id,
     orgId: row.org_id,
     fullName: row.full_name,
     email: row.email,
     phone: row.phone,
-    tagsJson: JSON.stringify(row.tags_json ?? []),
+    tagsJson: JSON.stringify(normalizeTags(tagsArr)),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -713,10 +725,18 @@ export async function upsertUserProfile(params: {
   const existing = await getUserProfile(params.orgId, params.userId);
   const now = nowIso();
 
+  const existingTags = (() => {
+    try {
+      return JSON.parse(existing.tagsJson || "[]");
+    } catch {
+      return [];
+    }
+  })();
+
   const nextFullName = params.fullName ?? existing.fullName ?? null;
   const nextEmail = params.email ?? existing.email ?? null;
   const nextPhone = params.phone ?? existing.phone ?? null;
-  const nextTags = params.tags ?? JSON.parse(existing.tagsJson || "[]");
+  const nextTags = normalizeTags(params.tags ?? existingTags);
 
   await q(
     `UPDATE user_profiles
@@ -740,15 +760,10 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
-    row.id,
-    row.orgId,
-    row.userId,
-    row.authorId,
-    row.ts,
-    row.note,
-    row.createdAt,
-  ]);
+  await q(
+    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
+  );
 
   return row;
 }
@@ -756,11 +771,10 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
 export async function listUserNotes(params: { orgId: string; userId: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 500));
 
-  const rows = await q<any>("SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3", [
-    params.orgId,
-    params.userId,
-    limit,
-  ]);
+  const rows = await q<any>(
+    "SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3",
+    [params.orgId, params.userId, limit],
+  );
 
   const au = await q<any>("SELECT id, username FROM users WHERE org_id = $1", [params.orgId]);
   const authors = new Map<string, string>();
@@ -809,7 +823,10 @@ export async function createOutletSession(params: {
 }
 
 export async function getOutletSession(params: { orgId: string; sessionId: string }) {
-  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [params.orgId, params.sessionId]);
+  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [
+    params.orgId,
+    params.sessionId,
+  ]);
   const r = rows[0];
   if (!r) return null;
 
@@ -849,21 +866,19 @@ export async function listOutletSessionsForUser(params: { orgId: string; userId:
   }));
 }
 
-/**
- * List sessions visible to a manager/admin.
- * - admin: sees visibility in ('admin','manager') + anything escalated to admin
- * - manager: sees visibility='manager' + anything escalated to manager (and optionally assigned to them)
- */
 export async function listOutletSessionsForStaff(params: {
   orgId: string;
-  role: Role; // "manager" | "admin" (we'll ignore "user")
+  role: Role;
   staffUserId?: string;
   limit?: number;
 }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 300));
   if (params.role !== "manager" && params.role !== "admin") return [];
 
-  const visibilityClause = params.role === "admin" ? `(s.visibility = 'admin' OR s.visibility = 'manager')` : `(s.visibility = 'manager')`;
+  const visibilityClause =
+    params.role === "admin"
+      ? `(s.visibility = 'admin' OR s.visibility = 'manager')`
+      : `(s.visibility = 'manager')`;
 
   const escRole = params.role;
   const escWhere: string[] = [`e.org_id = $1`, `e.escalated_to_role = $2`];
@@ -935,16 +950,17 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     createdAt: nowIso(),
   };
 
-  await q(`INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [
-    msg.id,
+  await q(
+    `INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
+  );
+
+  await q(`UPDATE outlet_sessions SET updated_at = $1 WHERE org_id = $2 AND id = $3`, [
+    msg.createdAt,
     msg.orgId,
     msg.sessionId,
-    msg.sender,
-    msg.content,
-    msg.createdAt,
   ]);
-
-  await q(`UPDATE outlet_sessions SET updated_at = $1 WHERE org_id = $2 AND id = $3`, [msg.createdAt, msg.orgId, msg.sessionId]);
 
   return msg;
 }
@@ -973,7 +989,11 @@ export async function escalateOutletSession(params: {
     [esc.id, esc.orgId, esc.sessionId, esc.escalatedToRole, esc.assignedToUserId, esc.reason, esc.createdAt],
   );
 
-  await q(`UPDATE outlet_sessions SET status = 'escalated', updated_at = $1 WHERE org_id = $2 AND id = $3`, [now, params.orgId, params.sessionId]);
+  await q(`UPDATE outlet_sessions SET status = 'escalated', updated_at = $1 WHERE org_id = $2 AND id = $3`, [
+    now,
+    params.orgId,
+    params.sessionId,
+  ]);
 
   return esc;
 }
@@ -1022,6 +1042,8 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
   const lines = [headers.join(",")];
 
   for (const r of rows) {
+    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
+    const tags = normalizeTags(tagsArr);
     const line = [
       r.id,
       r.username,
@@ -1032,7 +1054,7 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
       r.energy,
       r.stress,
       r.note ?? "",
-      JSON.stringify(r.tags_json ?? []),
+      JSON.stringify(tags),
       r.created_at,
     ]
       .map(csvEscape)
@@ -1058,6 +1080,8 @@ export async function exportUsersCsv(params: { orgId: string }) {
   const lines = [headers.join(",")];
 
   for (const r of rows) {
+    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
+    const tags = normalizeTags(tagsArr);
     const line = [
       r.user_id,
       r.username,
@@ -1066,7 +1090,7 @@ export async function exportUsersCsv(params: { orgId: string }) {
       r.full_name ?? "",
       r.email ?? "",
       r.phone ?? "",
-      JSON.stringify(r.tags_json ?? []),
+      JSON.stringify(tags),
       r.updated_at ?? "",
     ]
       .map(csvEscape)
