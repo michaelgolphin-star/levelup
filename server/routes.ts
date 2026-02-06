@@ -43,30 +43,178 @@ import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
 
 /**
  * NOTE: AI is stubbed here on purpose.
- * Phase 2 Step 2 goal is to wire the workflow without forcing OpenAI integration yet.
+ * Phase 2 goal is to wire the workflow without forcing OpenAI integration yet.
  * Later you can replace `generateOutletAiReply()` with a real provider.
+ *
+ * This stub is designed to avoid “looping” by:
+ * - Detecting closure language (“done”, “thanks”, “that’s it”)
+ * - Asking ONE focused follow-up instead of repeating a template
+ * - Offering concrete next steps (document, message draft, escalate, close)
  */
 async function generateOutletAiReply(params: {
   userMessage: string;
   category?: string | null;
   visibility?: string;
 }): Promise<{ reply: string; riskLevel: number }> {
-  const msg = params.userMessage.trim();
-
-  // ultra-light “risk heuristic” (NOT diagnosis)
+  const raw = params.userMessage ?? "";
+  const msg = raw.trim();
   const lowered = msg.toLowerCase();
-  const riskKeywords = ["suicide", "kill myself", "self harm", "hurt myself", "gun", "shoot", "homicide", "kill them"];
+
+  // -----------------------------
+  // Risk heuristic (NOT diagnosis)
+  // -----------------------------
+  const riskKeywords = [
+    "suicide",
+    "kill myself",
+    "self harm",
+    "self-harm",
+    "hurt myself",
+    "end my life",
+    "i want to die",
+    "gun",
+    "shoot",
+    "shooting",
+    "homicide",
+    "kill them",
+    "kill him",
+    "kill her",
+    "harm them",
+  ];
   const riskLevel = riskKeywords.some((k) => lowered.includes(k)) ? 2 : 0;
 
-  const reply =
-    "I hear you. Thanks for sharing this.\n\n" +
-    "A few quick questions to help you sort this out:\n" +
-    "1) What happened (facts) and what impact did it have on you?\n" +
-    "2) What would a reasonable outcome look like (schedule change, clarification, mediation, time off, boundaries, etc.)?\n" +
-    "3) Is this urgent or safety-related?\n\n" +
-    "If you want, I can help you: (a) write a clear message to your manager/HR, (b) document the situation, and (c) pick the best next step.";
+  // If risk detected, keep it calm + direct and encourage escalation/resources.
+  if (riskLevel >= 2) {
+    return {
+      riskLevel,
+      reply:
+        "I’m really glad you said something.\n\n" +
+        "If you’re in immediate danger or might act on these thoughts, please call 911 or go to the nearest ER.\n" +
+        "If you’re in the U.S., you can also call or text **988** (Suicide & Crisis Lifeline).\n\n" +
+        "For your workplace: I can help you document what’s going on and we can escalate this to an admin (or HR) right now.\n\n" +
+        "If you can, tell me: are you safe right this moment? (yes/no)",
+    };
+  }
 
-  return { reply, riskLevel };
+  // -----------------------------
+  // Stop the “loop”: closure intent
+  // -----------------------------
+  const donePhrases = [
+    "done",
+    "im done",
+    "i'm done",
+    "that’s it",
+    "thats it",
+    "nothing else",
+    "no",
+    "nope",
+    "all good",
+    "thanks",
+    "thank you",
+    "cool",
+    "ok",
+    "okay",
+    "got it",
+    "understood",
+    "sounds good",
+    "close",
+    "end",
+    "stop",
+  ];
+  const looksLikeClosure =
+    donePhrases.some((p) => lowered === p || lowered.includes(p)) ||
+    msg.length <= 2;
+
+  if (looksLikeClosure) {
+    return {
+      riskLevel: 0,
+      reply:
+        "Got it. Before we wrap, here are 3 clean options you can pick from:\n\n" +
+        "1) **Document it** (quick log you can paste into notes/HR)\n" +
+        "2) **Draft a message** to your manager (calm + clear + outcome-focused)\n" +
+        "3) **Escalate** (if you want this visible to management/admin)\n\n" +
+        "If you want, reply with **1**, **2**, or **3** — or type **close** and I’ll leave this session ready to revisit later.",
+    };
+  }
+
+  // -----------------------------
+  // Category + intent cues
+  // -----------------------------
+  const category = (params.category || "").toLowerCase();
+  const hasTimeWords = /today|yesterday|last week|this week|shift|schedule|hours|overtime|late|relief/.test(lowered);
+  const hasPayWords = /pay|wage|raise|hours|shorted|missing|tips|commission|bonus|rate/.test(lowered);
+  const hasConflictWords = /manager|supervisor|coworker|harass|bully|yell|argument|threat|disrespect/.test(lowered);
+  const hasSafetyWords = /unsafe|injury|accident|violence|threat|weapon|assault|stalk/.test(lowered);
+  const wantsDraft = /write|draft|text|message|email|say to|script/.test(lowered);
+  const wantsEscalation = /escalate|hr|report|complaint|union|lawyer|legal/.test(lowered);
+
+  // If the user explicitly asks for a draft, give a draft immediately.
+  if (wantsDraft) {
+    const subjectLine = hasPayWords
+      ? "Pay clarification"
+      : hasTimeWords
+        ? "Schedule/shift clarification"
+        : hasConflictWords
+          ? "Request for support"
+          : "Quick check-in";
+    return {
+      riskLevel: 0,
+      reply:
+        `Here’s a clean draft you can use (edit names/dates):\n\n` +
+        `**Subject:** ${subjectLine}\n\n` +
+        `Hi [Manager Name],\n\n` +
+        `I wanted to document an issue I experienced: ${msg}\n\n` +
+        `The impact on me is: [brief impact — stress, confusion, workload, safety, etc.].\n\n` +
+        `A reasonable outcome I’m requesting is: [specific ask — clarification, schedule adjustment, pay correction, mediation, etc.].\n\n` +
+        `Can we align on next steps by [date/time]?\n\n` +
+        `Thank you,\n[Your Name]\n\n` +
+        `If you want, tell me: **who is this going to** (manager/HR/admin) and **what outcome you want** in one sentence, and I’ll tighten it.`,
+    };
+  }
+
+  // If user wants escalation, guide them to choose a path + what’s shared.
+  if (wantsEscalation || hasSafetyWords) {
+    return {
+      riskLevel: 0,
+      reply:
+        "Understood. We can escalate this in a controlled way.\n\n" +
+        "Two questions so we do it right:\n" +
+        "1) Who should see it? **manager** or **admin**\n" +
+        "2) What’s the goal: **support**, **investigation**, or **immediate action**?\n\n" +
+        "Reply like: `manager + support` or `admin + immediate action`.",
+    };
+  }
+
+  // -----------------------------
+  // Default: one focused follow-up
+  // -----------------------------
+  // We avoid repeating the same 3 questions every time.
+  // We pick ONE best next question based on what’s missing.
+  const looksLikeVague =
+    msg.length < 40 &&
+    !hasTimeWords &&
+    !hasPayWords &&
+    !hasConflictWords &&
+    !hasSafetyWords;
+
+  if (looksLikeVague) {
+    return {
+      riskLevel: 0,
+      reply:
+        "I hear you. Help me aim this right with one detail:\n\n" +
+        "What’s the **main category** — *schedule*, *pay*, *conflict*, *performance pressure*, or *other*?\n\n" +
+        "Reply with one word (or a short phrase).",
+    };
+  }
+
+  // If they gave context, ask for desired outcome (single question).
+  return {
+    riskLevel: 0,
+    reply:
+      "Thank you — that’s clear.\n\n" +
+      "What would a **reasonable outcome** look like for you?\n" +
+      "Examples: schedule change, clear expectations, pay correction, mediation, written policy, time off, boundaries.\n\n" +
+      "Reply with the outcome you want in one sentence, and I’ll help you choose the best next step.",
+  };
 }
 
 const RegisterSchema = z.object({
@@ -414,7 +562,7 @@ export function registerRoutes(app: Express) {
     return res.json({ session });
   });
 
-  // Employee: list my outlet sessions
+  // Employee: list my outlet sessions (staff can request staff view via ?view=staff)
   app.get("/api/outlet/sessions", requireAuth, async (req, res) => {
     const schema = z.object({ limit: z.string().optional() });
     const parsed = schema.safeParse(req.query);
@@ -424,7 +572,6 @@ export function registerRoutes(app: Express) {
     const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
 
-    // staff can request staff view via ?view=staff
     const view = String((req.query as any).view || "");
     if (view === "staff" && (auth.role === "admin" || auth.role === "manager")) {
       const sessions = await listOutletSessionsForStaff({
@@ -451,17 +598,11 @@ export function registerRoutes(app: Express) {
     const isOwner = session.userId === auth.userId;
     const isStaff = auth.role === "admin" || auth.role === "manager";
 
-    // Visibility rules:
-    // - owner always allowed
-    // - staff allowed if visibility permits OR it’s escalated for them (storage function handles in list view, but here we keep it simple)
     if (!isOwner) {
       if (!isStaff) return res.status(403).json({ error: "Forbidden" });
 
       const vis = String(session.visibility || "private");
-      const staffAllowed =
-        vis === "manager" ||
-        (vis === "admin" && auth.role === "admin");
-
+      const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
       if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -501,7 +642,7 @@ export function registerRoutes(app: Express) {
       content: ai.reply,
     });
 
-    // If risk triggers, force visibility to admin via escalation (MVP behavior)
+    // If risk triggers, escalate to admin (MVP behavior)
     if (ai.riskLevel >= 2) {
       await escalateOutletSession({
         orgId: auth.orgId,
@@ -515,7 +656,7 @@ export function registerRoutes(app: Express) {
     return res.json({ userMessage: userMsg, aiMessage: aiMsg, riskLevel: ai.riskLevel });
   });
 
-  // Staff: escalate a session (manager/admin) — also allowed for owner if you want “please escalate”
+  // Staff or owner: escalate a session (manager/admin)
   app.post("/api/outlet/sessions/:id/escalate", requireAuth, async (req, res) => {
     const sessionId = String(req.params.id || "");
     const parsed = OutletEscalateSchema.safeParse(req.body || {});
@@ -527,14 +668,7 @@ export function registerRoutes(app: Express) {
 
     const isOwner = session.userId === auth.userId;
     const isStaff = auth.role === "admin" || auth.role === "manager";
-
-    // owner can request escalation upward (manager/admin). staff can escalate as well.
     if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
-
-    // manager cannot escalate-to-admin? They can, but only admin can assign-to-user maybe later.
-    if (auth.role === "manager" && parsed.data.escalatedToRole === "admin") {
-      // allowed in MVP; change here if you want managers blocked from escalating to admin.
-    }
 
     const esc = await escalateOutletSession({
       orgId: auth.orgId,
