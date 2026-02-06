@@ -142,7 +142,10 @@ function badgeTone(which: "mood" | "energy" | "stress", v: number) {
   return "good";
 }
 
-function countDaysWhere(rows: { stressAvg: number | null; moodAvg: number | null; energyAvg: number | null }[], fn: (r: any) => boolean) {
+function countDaysWhere(
+  rows: { stressAvg: number | null; moodAvg: number | null; energyAvg: number | null }[],
+  fn: (r: any) => boolean,
+) {
   let n = 0;
   for (const r of rows) if (fn(r)) n++;
   return n;
@@ -206,11 +209,7 @@ export default function DashboardPage() {
       setLoading(true);
       setError(null);
 
-      const [c, h, s] = await Promise.all([
-        api.listCheckins(500),
-        api.listHabits(false),
-        api.summary(30),
-      ]);
+      const [c, h, s] = await Promise.all([api.listCheckins(500), api.listHabits(false), api.summary(30)]);
 
       setCheckins((c.checkins || []) as any);
       setHabits((h.habits || []) as any);
@@ -418,7 +417,6 @@ export default function DashboardPage() {
         text: `Energy has been low on ${daysWithEnergyLow} of the last 7 days. This usually means sleep, workload, or recovery needs attention.`,
         ctaLabel: "Review your last 7 days",
         action: () => {
-          // Just scroll the user to the table visually by switching to check-in tab (table is above tabs)
           setTab("checkin");
           window.scrollTo({ top: 0, behavior: "smooth" });
         },
@@ -469,9 +467,7 @@ export default function DashboardPage() {
               <div className="sub">Getting your dashboard ready…</div>
             </div>
           </div>
-          <div className="body">
-            {error ? <div className="toast bad">{error}</div> : <div className="small">Loading…</div>}
-          </div>
+          <div className="body">{error ? <div className="toast bad">{error}</div> : <div className="small">Loading…</div>}</div>
         </div>
       </div>
     );
@@ -545,7 +541,9 @@ export default function DashboardPage() {
           <div className="panel" style={{ marginTop: 14 }}>
             <div className="panelTitle">
               <span>{todayInsight.title}</span>
-              <span className={`badge ${todayInsight.tone}`}>{todayInsight.tone === "bad" ? "Action" : todayInsight.tone === "warn" ? "Nudge" : "On track"}</span>
+              <span className={`badge ${todayInsight.tone}`}>
+                {todayInsight.tone === "bad" ? "Action" : todayInsight.tone === "warn" ? "Nudge" : "On track"}
+              </span>
             </div>
 
             <div className="bubbleText" style={{ marginTop: 10 }}>
@@ -565,7 +563,6 @@ export default function DashboardPage() {
               <button
                 className="btn"
                 onClick={() => {
-                  // quick “reset” action without navigating away
                   window.scrollTo({ top: 0, behavior: "smooth" });
                 }}
               >
@@ -604,27 +601,9 @@ export default function DashboardPage() {
                       <tr key={r.dayKey}>
                         <td>{r.dayKey}</td>
                         <td>{r.count}</td>
-                        <td>
-                          {mood === null ? (
-                            <span className="small">—</span>
-                          ) : (
-                            <span className={`badge ${badgeTone("mood", mood)}`}>{fmt1(mood)}</span>
-                          )}
-                        </td>
-                        <td>
-                          {energy === null ? (
-                            <span className="small">—</span>
-                          ) : (
-                            <span className={`badge ${badgeTone("energy", energy)}`}>{fmt1(energy)}</span>
-                          )}
-                        </td>
-                        <td>
-                          {stress === null ? (
-                            <span className="small">—</span>
-                          ) : (
-                            <span className={`badge ${badgeTone("stress", stress)}`}>{fmt1(stress)}</span>
-                          )}
-                        </td>
+                        <td>{mood === null ? <span className="small">—</span> : <span className={`badge ${badgeTone("mood", mood)}`}>{fmt1(mood)}</span>}</td>
+                        <td>{energy === null ? <span className="small">—</span> : <span className={`badge ${badgeTone("energy", energy)}`}>{fmt1(energy)}</span>}</td>
+                        <td>{stress === null ? <span className="small">—</span> : <span className={`badge ${badgeTone("stress", stress)}`}>{fmt1(stress)}</span>}</td>
                       </tr>
                     );
                   })}
@@ -640,11 +619,7 @@ export default function DashboardPage() {
           {/* Tabs */}
           <div className="dashTabs" style={{ marginTop: 14 }}>
             {tabs.map((t) => (
-              <button
-                key={t.id}
-                className={`btn ${tab === t.id ? "primary" : ""}`}
-                onClick={() => setTab(t.id)}
-              >
+              <button key={t.id} className={`btn ${tab === t.id ? "primary" : ""}`} onClick={() => setTab(t.id)}>
                 {t.label}
               </button>
             ))}
@@ -666,14 +641,7 @@ export default function DashboardPage() {
                     <div className="kpi">
                       <div className="small">Mood</div>
                       <div className="dashSliderRow">
-                        <input
-                          className="dashSlider"
-                          type="range"
-                          min={1}
-                          max={10}
-                          value={mood}
-                          onChange={(e) => setMood(Number(e.target.value))}
-                        />
+                        <input className="dashSlider" type="range" min={1} max={10} value={mood} onChange={(e) => setMood(Number(e.target.value))} />
                         <span className={`badge ${badgeTone("mood", mood)}`}>{mood}</span>
                       </div>
                     </div>
@@ -681,14 +649,7 @@ export default function DashboardPage() {
                     <div className="kpi">
                       <div className="small">Energy</div>
                       <div className="dashSliderRow">
-                        <input
-                          className="dashSlider"
-                          type="range"
-                          min={1}
-                          max={10}
-                          value={energy}
-                          onChange={(e) => setEnergy(Number(e.target.value))}
-                        />
+                        <input className="dashSlider" type="range" min={1} max={10} value={energy} onChange={(e) => setEnergy(Number(e.target.value))} />
                         <span className={`badge ${badgeTone("energy", energy)}`}>{energy}</span>
                       </div>
                     </div>
@@ -696,14 +657,7 @@ export default function DashboardPage() {
                     <div className="kpi">
                       <div className="small">Stress</div>
                       <div className="dashSliderRow">
-                        <input
-                          className="dashSlider"
-                          type="range"
-                          min={1}
-                          max={10}
-                          value={stress}
-                          onChange={(e) => setStress(Number(e.target.value))}
-                        />
+                        <input className="dashSlider" type="range" min={1} max={10} value={stress} onChange={(e) => setStress(Number(e.target.value))} />
                         <span className={`badge ${badgeTone("stress", stress)}`}>{stress}</span>
                       </div>
                     </div>
@@ -716,12 +670,7 @@ export default function DashboardPage() {
                     {quickTags.map((t) => {
                       const active = parseTagsCSV(tagsCsv).includes(t);
                       return (
-                        <button
-                          key={t}
-                          className={`chip ${active ? "active" : ""}`}
-                          type="button"
-                          onClick={() => toggleQuickTag(t)}
-                        >
+                        <button key={t} className={`chip ${active ? "active" : ""}`} type="button" onClick={() => toggleQuickTag(t)}>
                           {t}
                         </button>
                       );
@@ -730,23 +679,12 @@ export default function DashboardPage() {
 
                   <div style={{ marginTop: 12 }}>
                     <div className="label">Tags (comma separated)</div>
-                    <input
-                      className="input"
-                      value={tagsCsv}
-                      onChange={(e) => setTagsCsv(e.target.value)}
-                      placeholder="workload, scheduling, conflict…"
-                    />
+                    <input className="input" value={tagsCsv} onChange={(e) => setTagsCsv(e.target.value)} placeholder="workload, scheduling, conflict…" />
                   </div>
 
                   <div style={{ marginTop: 12 }}>
                     <div className="label">Note (optional)</div>
-                    <textarea
-                      className="textarea"
-                      rows={4}
-                      value={note}
-                      onChange={(e) => setNote(e.target.value)}
-                      placeholder="What happened today? What do you need?"
-                    />
+                    <textarea className="textarea" rows={4} value={note} onChange={(e) => setNote(e.target.value)} placeholder="What happened today? What do you need?" />
                   </div>
 
                   <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
@@ -780,7 +718,7 @@ export default function DashboardPage() {
 
                     <button className="listItem" onClick={() => setTab("patterns")} type="button">
                       <div className="listTitle">My Patterns</div>
-                      <div className="small">Averages + streaks (30 days).</div>
+                      <div className="small">Inline summary + best next move.</div>
                     </button>
 
                     {isStaff ? (
@@ -906,9 +844,11 @@ export default function DashboardPage() {
           ) : null}
 
           {tab === "patterns" ? (
-            <PatternsPanel setError={setError} summary={summary} checkins={checkins} onRefresh={refreshData} />
+            <PatternsPanel setError={setError} summary={summary} checkins={checkins} onRefresh={refreshData} onNavigate={nav} onAddHabit={addHabit} />
           ) : null}
+
           {tab === "trends" && isStaff ? <TrendsPanel setError={setError} /> : null}
+
           {tab === "org" && isStaff ? (
             <div style={{ marginTop: 14 }}>
               <OrgPanel role={auth.role as Role} myUserId={auth.userId} org={org} />
@@ -920,7 +860,73 @@ export default function DashboardPage() {
   );
 }
 
-function PatternsPanel({ setError }: { setError: (s: string | null) => void }) {
+function PatternsPanel({
+  setError,
+  summary,
+  checkins,
+  onRefresh,
+  onNavigate,
+  onAddHabit,
+}: {
+  setError: (s: string | null) => void;
+  summary: UserSummary | null;
+  checkins: CheckIn[];
+  onRefresh: () => Promise<void>;
+  onNavigate: (path: string) => void;
+  onAddHabit: () => Promise<void>;
+}) {
+  const topTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of checkins) {
+      const tags = tagsFromTagsJson(c.tagsJson);
+      for (const t of tags) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+  }, [checkins]);
+
+  const insight = useMemo(() => {
+    const mood = summary?.overall?.moodAvg ?? null;
+    const energy = summary?.overall?.energyAvg ?? null;
+    const stress = summary?.overall?.stressAvg ?? null;
+
+    if (stress !== null && Number(stress) >= 7) {
+      return {
+        tone: "bad" as const,
+        title: "Best next move",
+        text: "Stress is running high. Use Counselor’s Office to dump the facts (short + private).",
+        cta: "Open Counselor’s Office",
+        action: () => onNavigate("/outlet"),
+      };
+    }
+    if (energy !== null && Number(energy) <= 4) {
+      return {
+        tone: "warn" as const,
+        title: "Best next move",
+        text: "Energy has been low. Keep check-ins short and tag what’s draining you so patterns show up fast.",
+        cta: "Refresh data",
+        action: () => onRefresh(),
+      };
+    }
+    if (mood !== null && Number(mood) <= 4) {
+      return {
+        tone: "warn" as const,
+        title: "Best next move",
+        text: "Mood has been low. Don’t overthink it—look for repeat triggers in tags/notes.",
+        cta: "Refresh data",
+        action: () => onRefresh(),
+      };
+    }
+    return {
+      tone: "good" as const,
+      title: "Best next move",
+      text: "You’re trending steady. Add one small habit that’s easy to repeat even on rough days.",
+      cta: "Add a habit",
+      action: () => onAddHabit(),
+    };
+  }, [summary, onNavigate, onAddHabit, onRefresh]);
+
   return (
     <div style={{ marginTop: 14 }}>
       <div className="panel">
@@ -930,29 +936,100 @@ function PatternsPanel({ setError }: { setError: (s: string | null) => void }) {
         </div>
 
         <div className="small" style={{ marginTop: 10 }}>
-          Uses /api/analytics/summary (streak + averages).
+          Inline summary (no popups). Use this to decide your next move.
         </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-          <button
-            className="btn primary"
-            onClick={async () => {
-              setError(null);
-              try {
-                const r = await api.summary(30);
-                const s = r.summary;
-                alert(
-                  `Last ${s.days} days\nStreak: ${s.streak}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${
-                    s.overall.energyAvg ?? "—"
-                  }\nStress avg: ${s.overall.stressAvg ?? "—"}`,
-                );
-              } catch (e: any) {
-                setError(e?.message || "Failed to load summary.");
-              }
-            }}
-          >
-            View 30-day summary
-          </button>
+        <div className="kpiRow" style={{ marginTop: 12 }}>
+          <div className="kpi">
+            <div className="small">Streak</div>
+            <div className="num">{summary?.streak ?? "—"}</div>
+            <div className="small">Days in a row</div>
+          </div>
+
+          <div className="kpi">
+            <div className="small">Mood avg</div>
+            <div className="num">{fmt1(summary?.overall?.moodAvg)}</div>
+            <div className="small">30-day baseline</div>
+          </div>
+
+          <div className="kpi">
+            <div className="small">Energy avg</div>
+            <div className="num">{fmt1(summary?.overall?.energyAvg)}</div>
+            <div className="small">30-day baseline</div>
+          </div>
+
+          <div className="kpi">
+            <div className="small">Stress avg</div>
+            <div className="num">{fmt1(summary?.overall?.stressAvg)}</div>
+            <div className="small">Lower is better</div>
+          </div>
+
+          <div className="kpi">
+            <div className="small">Top tags</div>
+            <div className="num">{topTags.length ? topTags.length : "—"}</div>
+            <div className="small">Unique drivers</div>
+          </div>
+        </div>
+
+        <div className="panel" style={{ marginTop: 14 }}>
+          <div className="panelTitle">
+            <span>Most common tags</span>
+            <span className="badge">{checkins.length} check-ins</span>
+          </div>
+
+          {!topTags.length ? (
+            <div className="small" style={{ marginTop: 10 }}>
+              No tags yet. Use quick tags during check-in and this panel becomes powerful.
+            </div>
+          ) : (
+            <div className="chips" style={{ marginTop: 10, justifyContent: "flex-start" }}>
+              {topTags.map(([t, n]) => (
+                <span key={t} className="badge">
+                  {t} • {n}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="toast" style={{ marginTop: 14 }}>
+          <div className="panelTitle" style={{ marginBottom: 6 }}>
+            <span>{insight.title}</span>
+            <span className={`badge ${insight.tone}`}>
+              {insight.tone === "bad" ? "Action" : insight.tone === "warn" ? "Nudge" : "On track"}
+            </span>
+          </div>
+          <div className="bubbleText">{insight.text}</div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+            <button
+              className="btn primary"
+              onClick={async () => {
+                setError(null);
+                try {
+                  await insight.action();
+                } catch (e: any) {
+                  setError(e?.message || "Action failed.");
+                }
+              }}
+            >
+              {insight.cta}
+            </button>
+
+            <button
+              className="btn"
+              onClick={async () => {
+                setError(null);
+                try {
+                  await onRefresh();
+                } catch (e: any) {
+                  setError(e?.message || "Refresh failed.");
+                }
+              }}
+            >
+              Refresh data
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1164,11 +1241,7 @@ function OrgPanel({
                           <button className="btn" onClick={() => changeRole(u.id, "user")} disabled={u.role === "user"}>
                             user
                           </button>
-                          <button
-                            className="btn"
-                            onClick={() => changeRole(u.id, "manager")}
-                            disabled={u.role === "manager"}
-                          >
+                          <button className="btn" onClick={() => changeRole(u.id, "manager")} disabled={u.role === "manager"}>
                             manager
                           </button>
                           <button className="btn" onClick={() => changeRole(u.id, "admin")} disabled={u.role === "admin"}>
@@ -1209,9 +1282,7 @@ function OrgPanel({
                 <input
                   className="input"
                   value={selectedProfile?.fullName || ""}
-                  onChange={(e) =>
-                    setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), fullName: e.target.value }))
-                  }
+                  onChange={(e) => setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), fullName: e.target.value }))}
                   placeholder="Full name"
                 />
 
@@ -1221,9 +1292,7 @@ function OrgPanel({
                     <input
                       className="input"
                       value={selectedProfile?.email || ""}
-                      onChange={(e) =>
-                        setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), email: e.target.value }))
-                      }
+                      onChange={(e) => setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), email: e.target.value }))}
                       placeholder="Email"
                     />
                   </div>
@@ -1232,9 +1301,7 @@ function OrgPanel({
                     <input
                       className="input"
                       value={selectedProfile?.phone || ""}
-                      onChange={(e) =>
-                        setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), phone: e.target.value }))
-                      }
+                      onChange={(e) => setSelectedProfile((p) => ({ ...(p || { orgId: "", userId: selectedId }), phone: e.target.value }))}
                       placeholder="Phone"
                     />
                   </div>
@@ -1265,13 +1332,7 @@ function OrgPanel({
                   <>
                     <hr />
                     <div className="label">Staff notes</div>
-                    <textarea
-                      className="textarea"
-                      rows={3}
-                      value={noteText}
-                      onChange={(e) => setNoteText(e.target.value)}
-                      placeholder="Add a note (staff only)…"
-                    />
+                    <textarea className="textarea" rows={3} value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder="Add a note (staff only)…" />
                     <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
                       <button className="btn primary" onClick={addNote} disabled={!noteText.trim()}>
                         Add note
@@ -1349,24 +1410,14 @@ function OrgPanel({
                   <div className="label">Invite link</div>
                   <div className="row">
                     <div className="col" style={{ flexBasis: 180 }}>
-                      <select
-                        className="select"
-                        value={inviteRole}
-                        onChange={(e) => setInviteRole(e.target.value as Role)}
-                      >
+                      <select className="select" value={inviteRole} onChange={(e) => setInviteRole(e.target.value as Role)}>
                         <option value="user">user</option>
                         <option value="manager">manager</option>
                         <option value="admin">admin</option>
                       </select>
                     </div>
                     <div className="col" style={{ flexBasis: 160 }}>
-                      <input
-                        className="input"
-                        value={inviteDays}
-                        onChange={(e) => setInviteDays(e.target.value)}
-                        placeholder="7"
-                        type="number"
-                      />
+                      <input className="input" value={inviteDays} onChange={(e) => setInviteDays(e.target.value)} placeholder="7" type="number" />
                     </div>
                     <div className="col" style={{ flexBasis: 160 }}>
                       <button className="btn primary" onClick={createInvite}>
