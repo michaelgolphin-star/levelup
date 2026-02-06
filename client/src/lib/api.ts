@@ -1,27 +1,84 @@
-import React from "react";
-import { Routes, Route, Navigate, Link, useNavigate, useParams } from "react-router-dom";
-import { api, getToken, setToken } from "../lib/api";
-import AuthPage from "./AuthPage";
-import DashboardPage from "./DashboardPage";
-import LandingPage from "./LandingPage";
-import InviteAcceptPage from "./InviteAcceptPage";
-import ResetPage from "./ResetPage";
+export type Role = "user" | "manager" | "admin";
 
-/* ---------------- Outlet (Counselor’s Office) ---------------- */
+export type AuthUser = { id: string; username: string; orgId: string; role: Role };
+export type Org = { id: string; name: string; createdAt: string };
 
-type OutletSession = {
+export type InviteInfo = { token: string; role: Role; expiresAt: string };
+export type UserProfile = {
+  userId: string;
+  orgId: string;
+  fullName: string | null;
+  email: string | null;
+  phone: string | null;
+  tagsJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type UserNote = {
   id: string;
   orgId: string;
   userId: string;
-  visibility: "private" | "manager" | "admin";
+  authorId: string;
+  authorUsername: string;
+  ts: string;
+  note: string;
+  createdAt: string;
+};
+
+export type CheckIn = {
+  id: string;
+  orgId: string;
+  userId: string;
+  ts: string;
+  dayKey: string;
+  mood: number;
+  energy: number;
+  stress: number;
+  note: string | null;
+  tagsJson: string;
+  createdAt: string;
+};
+
+export type Habit = {
+  id: string;
+  orgId: string;
+  userId: string;
+  name: string;
+  targetPerWeek: number;
+  createdAt: string;
+  archivedAt: string | null;
+};
+
+export type OrgSummary = {
+  days: number;
+  overall: { moodAvg: number | null; energyAvg: number | null; stressAvg: number | null; checkins: number; users: number };
+  byDay: Array<{ dayKey: string; moodAvg: number; energyAvg: number; stressAvg: number; checkins: number; users: number }>;
+  risk: Array<{ userId: string; username: string; moodAvg: number; stressAvg: number; count: number }>;
+};
+
+export type Summary = {
+  days: number;
+  streak: number;
+  today: string;
+  overall: { moodAvg: number | null; energyAvg: number | null; stressAvg: number | null; total: number };
+  byDay: Array<{ dayKey: string; moodAvg: number; energyAvg: number; stressAvg: number; count: number }>;
+};
+
+/** Outlet / Counselor’s Office */
+export type OutletVisibility = "private" | "manager" | "admin";
+export type OutletStatus = "open" | "escalated" | "closed";
+export type OutletSession = {
+  id: string;
+  orgId: string;
+  userId: string;
+  visibility: OutletVisibility;
   category: string | null;
-  status: "open" | "escalated" | "closed";
+  status: OutletStatus;
   riskLevel: number;
   createdAt: string;
   updatedAt: string;
 };
-
-type OutletMessage = {
+export type OutletMessage = {
   id: string;
   orgId: string;
   sessionId: string;
@@ -30,314 +87,179 @@ type OutletMessage = {
   createdAt: string;
 };
 
-function OutletHomePage() {
-  const nav = useNavigate();
-  const [sessions, setSessions] = React.useState<OutletSession[]>([]);
-  const [category, setCategory] = React.useState("");
-  const [visibility, setVisibility] = React.useState<"private" | "manager" | "admin">("private");
-  const [err, setErr] = React.useState<string | null>(null);
+const TOKEN_KEY = "levelup_token";
 
-  async function load() {
-    setErr(null);
-    try {
-      const res = await api.outletListMySessions();
-      setSessions(res.sessions || []);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load sessions");
-    }
-  }
-
-  async function create() {
-    setErr(null);
-    try {
-      const res = await api.outletCreateSession({
-        category: category.trim() || null,
-        visibility,
-      });
-      nav(`/outlet/${res.session.id}`);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to create session");
-    }
-  }
-
-  React.useEffect(() => {
-    load();
-  }, []);
-
-  return (
-    <div className="container">
-      <div className="card">
-        <h2>Counselor’s Office</h2>
-        <div className="sub">
-          A private, AI-guided space to process concerns while you’re still employed.
-        </div>
-
-        {err ? <div className="badge">{err}</div> : null}
-
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <input
-            className="input"
-            placeholder="Category (burnout, pay, schedule, conflict…)"
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-          />
-          <select
-            className="input"
-            value={visibility}
-            onChange={(e) => setVisibility(e.target.value as any)}
-          >
-            <option value="private">Private (AI only)</option>
-            <option value="manager">Visible to manager</option>
-            <option value="admin">Visible to admin</option>
-          </select>
-          <button className="btn" onClick={create}>
-            Start
-          </button>
-          <button className="btn" onClick={load}>
-            Refresh
-          </button>
-        </div>
-
-        <hr />
-
-        {sessions.length === 0 ? (
-          <div className="sub">No sessions yet. Create one above.</div>
-        ) : null}
-
-        {sessions.map((s) => (
-          <div
-            key={s.id}
-            className="card"
-            style={{ cursor: "pointer" }}
-            onClick={() => nav(`/outlet/${s.id}`)}
-          >
-            <b>{s.category || "General"}</b>
-            <div className="sub">
-              {s.status} • {s.visibility}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+export function setToken(t: string | null) {
+  if (!t) localStorage.removeItem(TOKEN_KEY);
+  else localStorage.setItem(TOKEN_KEY, t);
 }
 
-function OutletSessionPage() {
-  const { id } = useParams();
-  const sessionId = String(id || "");
-  const nav = useNavigate();
-
-  const [session, setSession] = React.useState<OutletSession | null>(null);
-  const [messages, setMessages] = React.useState<OutletMessage[]>([]);
-  const [content, setContent] = React.useState("");
-  const [err, setErr] = React.useState<string | null>(null);
-  const [sending, setSending] = React.useState(false);
-
-  async function load() {
-    setErr(null);
-    try {
-      const res = await api.outletGetSession(sessionId);
-      setSession(res.session);
-      setMessages(res.messages || []);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load session");
-    }
-  }
-
-  async function send() {
-    const text = content.trim();
-    if (!text) return;
-    setSending(true);
-    setErr(null);
-    try {
-      await api.outletSendMessage(sessionId, text);
-      setContent("");
-      await load();
-    } catch (e: any) {
-      setErr(e?.message || "Failed to send message");
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function escalate(role: "manager" | "admin") {
-    setErr(null);
-    try {
-      await api.outletEscalate(sessionId, {
-        escalatedToRole: role,
-        reason: "Employee requested escalation",
-      });
-      await load();
-    } catch (e: any) {
-      setErr(e?.message || "Failed to escalate");
-    }
-  }
-
-  async function close() {
-    setErr(null);
-    try {
-      await api.outletClose(sessionId);
-      await load();
-    } catch (e: any) {
-      setErr(e?.message || "Failed to close session");
-    }
-  }
-
-  React.useEffect(() => {
-    if (!sessionId) return;
-    load();
-  }, [sessionId]);
-
-  return (
-    <div className="container">
-      <div className="card">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn" onClick={() => nav("/outlet")}>
-            ← Back
-          </button>
-          <button className="btn" onClick={() => escalate("manager")}>
-            Escalate to Manager
-          </button>
-          <button className="btn" onClick={() => escalate("admin")}>
-            Escalate to Admin
-          </button>
-          <button className="btn" onClick={close}>
-            Close
-          </button>
-        </div>
-
-        {session ? (
-          <>
-            <h2 style={{ marginTop: 12 }}>{session.category || "General"}</h2>
-            <div className="sub">
-              {session.status} • {session.visibility}
-            </div>
-          </>
-        ) : null}
-
-        {err ? <div className="badge" style={{ marginTop: 10 }}>{err}</div> : null}
-
-        <div className="card" style={{ maxHeight: 400, overflow: "auto", marginTop: 12 }}>
-          {messages.length === 0 ? (
-            <div className="sub">No messages yet. Say what’s on your mind.</div>
-          ) : null}
-
-          {messages.map((m) => (
-            <div key={m.id} style={{ marginBottom: 12 }}>
-              <div className="sub" style={{ marginBottom: 4 }}>
-                <b>{m.sender === "ai" ? "AI" : "You"}</b> • {new Date(m.createdAt).toLocaleString()}
-              </div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-            </div>
-          ))}
-        </div>
-
-        <textarea
-          className="input"
-          rows={4}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder="Say what’s on your mind…"
-          style={{ marginTop: 10 }}
-        />
-
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-          <button className="btn" onClick={send} disabled={sending || !content.trim()}>
-            {sending ? "Sending…" : "Send"}
-          </button>
-        </div>
-
-        <div className="sub" style={{ marginTop: 10 }}>
-          If this is an immediate safety issue, contact local emergency services or your company’s emergency process.
-        </div>
-      </div>
-    </div>
-  );
+/**
+ * Optional absolute API base:
+ *   VITE_API_BASE=https://your-api-domain
+ * Defaults to same-origin.
+ */
+const API_BASE = (import.meta as any)?.env?.VITE_API_BASE?.replace(/\/+$/, "") || "";
+function apiUrl(path: string) {
+  if (!path.startsWith("/")) path = `/${path}`;
+  return `${API_BASE}${path}`;
 }
 
-/* ---------------- App Shell ---------------- */
-
-function Topbar() {
-  const nav = useNavigate();
+async function req<T>(method: string, url: string, body?: any): Promise<T> {
   const token = getToken();
-  return (
-    <div className="container">
-      <div className="card hdr">
-        <h1>Level Up</h1>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Link className="badge" to="/">
-            About
-          </Link>
-          <Link className="badge" to="/dashboard">
-            Dashboard
-          </Link>
-          {token ? (
-            <Link className="badge" to="/outlet">
-              Counselor’s Office
-            </Link>
-          ) : null}
-          {token ? (
-            <button
-              className="btn"
-              onClick={() => {
-                setToken(null);
-                nav("/login");
-              }}
-            >
-              Log out
-            </button>
-          ) : (
-            <span className="badge">Not logged in</span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  const res = await fetch(apiUrl(url), {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = (data as any)?.error?.message || (data as any)?.error || (data as any)?.message || "Request failed";
+    throw new Error(typeof msg === "string" ? msg : "Request failed");
+  }
+  return data as T;
 }
 
-function RequireAuth({ children }: { children: React.ReactNode }) {
-  return getToken() ? <>{children}</> : <Navigate to="/login" replace />;
+/** Backwards-compatible helpers (older pages import these) */
+export type AuthPayload = { userId: string; orgId: string; role: Role; username?: string };
+
+export function apiGet<T>(url: string) {
+  return req<T>("GET", url);
+}
+export function apiPost<T>(url: string, body?: any) {
+  return req<T>("POST", url, body);
+}
+export function apiPut<T>(url: string, body?: any) {
+  return req<T>("PUT", url, body);
+}
+export function apiDelete<T>(url: string) {
+  return req<T>("DELETE", url);
 }
 
-export default function App() {
-  return (
-    <>
-      <Topbar />
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/login" element={<AuthPage mode="login" />} />
-        <Route path="/register" element={<AuthPage mode="register" />} />
-        <Route path="/invite/:token" element={<InviteAcceptPage />} />
-        <Route path="/reset" element={<ResetPage />} />
+export const api = {
+  async register(orgName: string, username: string, password: string) {
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
+  },
+  async login(username: string, password: string) {
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
+  },
+  async org() {
+    return req<{ org: Org }>("GET", "/api/org");
+  },
+  async users() {
+    return req<{ users: AuthUser[] }>("GET", "/api/users");
+  },
+  async adminCreateUser(payload: { username: string; password: string; role: Role }) {
+    return req<{ user: AuthUser }>("POST", "/api/admin/users", payload);
+  },
+  async setRole(userId: string, role: Role) {
+    return req<{ ok: boolean }>("POST", "/api/users/role", { userId, role });
+  },
 
-        <Route
-          path="/dashboard"
-          element={
-            <RequireAuth>
-              <DashboardPage />
-            </RequireAuth>
-          }
-        />
+  async createCheckin(payload: { mood: number; energy: number; stress: number; note?: string; tags?: string[] }) {
+    return req<{ checkin: CheckIn }>("POST", "/api/checkins", payload);
+  },
+  async listCheckins(limit = 200) {
+    return req<{ checkins: CheckIn[] }>("GET", `/api/checkins?limit=${encodeURIComponent(String(limit))}`);
+  },
+  async deleteCheckin(id: string) {
+    return req<{ ok: boolean }>("DELETE", `/api/checkins/${encodeURIComponent(id)}`);
+  },
 
-        <Route
-          path="/outlet"
-          element={
-            <RequireAuth>
-              <OutletHomePage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/outlet/:id"
-          element={
-            <RequireAuth>
-              <OutletSessionPage />
-            </RequireAuth>
-          }
-        />
+  async createHabit(payload: { name: string; targetPerWeek: number }) {
+    return req<{ habit: Habit }>("POST", "/api/habits", payload);
+  },
+  async listHabits(includeArchived = false) {
+    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${includeArchived ? "1" : "0"}`);
+  },
+  async archiveHabit(id: string) {
+    return req<{ ok: boolean }>("POST", `/api/habits/${encodeURIComponent(id)}/archive`);
+  },
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </>
-  );
-}
+  async summary(days = 30) {
+    return req<{ summary: Summary }>("GET", `/api/analytics/summary?days=${encodeURIComponent(String(days))}`);
+  },
+  async orgSummary(days = 30) {
+    return req<{ summary: OrgSummary }>("GET", `/api/analytics/org-summary?days=${encodeURIComponent(String(days))}`);
+  },
+
+  async createInvite(payload: { role: Role; expiresInDays: number }) {
+    return req<{ invite: InviteInfo; urlPath: string }>("POST", "/api/admin/invites", payload);
+  },
+  async getInvite(token: string) {
+    return req<{ invite: InviteInfo; org: Org }>("GET", `/api/invites/${encodeURIComponent(token)}`);
+  },
+  async acceptInvite(token: string, payload: { username: string; password: string }) {
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", `/api/invites/${encodeURIComponent(token)}/accept`, payload);
+  },
+
+  async requestPasswordReset(username: string) {
+    return req<{ reset: { token: string; expiresAt: string } }>("POST", "/api/auth/request-reset", { username });
+  },
+  async resetPassword(token: string, newPassword: string) {
+    return req<{ ok: boolean }>("POST", "/api/auth/reset", { token, newPassword });
+  },
+  async adminCreateResetToken(userId: string, expiresInMinutes = 60) {
+    return req<{ reset: { token: string; expiresAt: string } }>(
+      "POST",
+      `/api/admin/users/${encodeURIComponent(userId)}/reset-token`,
+      { expiresInMinutes },
+    );
+  },
+
+  async getProfile(userId: string) {
+    return req<{ profile: UserProfile }>("GET", `/api/users/${encodeURIComponent(userId)}/profile`);
+  },
+  async updateProfile(
+    userId: string,
+    payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] },
+  ) {
+    return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
+  },
+  async listNotes(userId: string, limit = 100) {
+    return req<{ notes: UserNote[] }>("GET", `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`);
+  },
+  async addNote(userId: string, note: string) {
+    return req<{ note: any }>("POST", `/api/users/${encodeURIComponent(userId)}/notes`, { note });
+  },
+
+  /** Outlet / Counselor’s Office */
+  async outletCreateSession(payload: { category?: string | null; visibility?: OutletVisibility }) {
+    return req<{ session: OutletSession }>("POST", "/api/outlet/sessions", payload);
+  },
+  async outletListMySessions(limit = 50) {
+    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?limit=${encodeURIComponent(String(limit))}`);
+  },
+  async outletListStaffSessions(limit = 200) {
+    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
+  },
+  async outletGetSession(sessionId: string) {
+    return req<{ session: OutletSession; messages: OutletMessage[] }>(
+      "GET",
+      `/api/outlet/sessions/${encodeURIComponent(sessionId)}`,
+    );
+  },
+  async outletSendMessage(sessionId: string, content: string) {
+    return req<{ userMessage: OutletMessage; aiMessage: OutletMessage; riskLevel: number }>(
+      "POST",
+      `/api/outlet/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { content },
+    );
+  },
+  async outletEscalate(
+    sessionId: string,
+    payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null },
+  ) {
+    return req<{ escalation: any }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/escalate`, payload);
+  },
+  async outletClose(sessionId: string) {
+    return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
+  },
+};
