@@ -1,8 +1,9 @@
 // client/src/ui/DashboardPage.tsx (FULL REPLACEMENT)
+
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
-import { api, apiDelete, apiGet, apiPost, apiPut, getToken } from "../lib/api";
+import { api, apiGet, apiPost, apiPut, getToken, setToken } from "../lib/api";
 
 type Org = { id: string; name: string };
 type User = { id: string; username: string; role: Role; orgId: string };
@@ -189,14 +190,18 @@ function tagsFromTagsJson(tagsJson?: string): string[] {
   }
 }
 
+function apiBase() {
+  return ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
+}
+function withBase(path: string) {
+  const base = apiBase();
+  if (!base) return path;
+  return path.startsWith("/") ? `${base}${path}` : `${base}/${path}`;
+}
+
 async function downloadCsv(path: string, filename: string) {
   const token = getToken() || "";
-
-  // IMPORTANT: use same API base logic as lib/api.ts
-  const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
-  const url = path.startsWith("/") ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
-
-  const res = await fetch(url, {
+  const res = await fetch(withBase(path), {
     method: "GET",
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -221,7 +226,7 @@ async function downloadCsv(path: string, filename: string) {
 export default function DashboardPage() {
   const nav = useNavigate();
 
-  const [auth, setAuth] = useState<AuthPayload | null>(null);
+  const [auth, setAuthState] = useState<AuthPayload | null>(null);
   const [org, setOrg] = useState<Org | null>(null);
 
   const [tab, setTab] = useState<"checkin" | "history" | "habits" | "patterns" | "org" | "trends">(
@@ -244,6 +249,7 @@ export default function DashboardPage() {
 
   const role = auth?.role;
   const isStaff = role === "admin" || role === "manager";
+  const isAdmin = role === "admin";
 
   const tabs = useMemo(() => {
     const base: { id: typeof tab; label: string }[] = [
@@ -257,13 +263,19 @@ export default function DashboardPage() {
     return base;
   }, [isStaff, tab]);
 
+  function forceLogoutToLogin() {
+    // clear storage via shared helper + go to login
+    setToken(null);
+    setAuthState(null);
+    nav("/login");
+  }
+
   async function refreshData() {
     try {
       setLoading(true);
       setError(null);
 
       const [c, h] = await Promise.all([api.listCheckins(200), api.listHabits(false)]);
-
       setCheckins((c.checkins || []) as any);
       setHabits((h.habits || []) as any);
     } catch (e: any) {
@@ -277,29 +289,34 @@ export default function DashboardPage() {
     (async () => {
       try {
         const me = await apiGet<{ auth: AuthPayload }>("/api/me");
-        setAuth(me.auth);
+        setAuthState(me.auth);
 
         const o = await apiGet<{ org: Org }>("/api/org");
         setOrg(o.org);
-      } catch {
-        // token missing/invalid
+      } catch (e: any) {
+        // token missing/invalid OR /api/me not implemented
+        const msg = (e?.message || "").toLowerCase();
+        const looksLikeMissingMe =
+          msg.includes("not found") || msg.includes("404") || msg.includes("cannot") || msg.includes("route");
+        if (looksLikeMissingMe) {
+          setError("Backend missing /api/me. Paste server/routes.ts next so we can add it.");
+          return;
+        }
         setError(null);
-        nav("/login");
+        forceLogoutToLogin();
       }
     })();
-  }, [nav]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!auth) return;
     refreshData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth]);
+  }, [auth?.userId]);
 
   function logout() {
-    // Token is stored under TOKEN_KEY in lib/api.ts; also clear legacy key.
-    localStorage.removeItem("levelup_token");
-    localStorage.removeItem("token");
-    nav("/login");
+    forceLogoutToLogin();
   }
 
   async function submitCheckin() {
@@ -386,7 +403,13 @@ export default function DashboardPage() {
     return (
       <div className="min-h-screen bg-gradient-to-b from-slate-950 to-emerald-950 text-white">
         <div className="mx-auto max-w-5xl px-4 py-10">
-          <div className="text-white/60">Loading…</div>
+          {error ? (
+            <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+              {error}
+            </div>
+          ) : (
+            <div className="text-white/60">Loading…</div>
+          )}
         </div>
       </div>
     );
@@ -781,7 +804,6 @@ function OrgPanel({
         expiresInDays: days,
       });
 
-      // Respect API base (if set) rather than location.origin
       const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
       const base = API_BASE || location.origin;
 
@@ -847,7 +869,6 @@ function OrgPanel({
           <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">{msg}</div>
         ) : null}
 
-        {/* Admin-only tools: exports + invites */}
         {isAdmin ? (
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
