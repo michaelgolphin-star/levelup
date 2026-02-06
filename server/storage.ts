@@ -85,6 +85,7 @@ function normalizeSender(v: any): OutletSender {
 }
 
 export async function ensureDb() {
+  // Base tables
   await q(`
     CREATE TABLE IF NOT EXISTS orgs (
       id TEXT PRIMARY KEY,
@@ -165,6 +166,8 @@ export async function ensureDb() {
     );
 
     -- Counselor’s Office / outlet sessions
+    -- NOTE: CREATE TABLE IF NOT EXISTS will NOT add new columns to an existing table.
+    -- We handle backfills with ALTER TABLE statements below.
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -208,32 +211,37 @@ export async function ensureDb() {
     );
   `);
 
-  // --- Backfill/migrate inbox fields on older DBs (safe on Railway) ---
+  // ✅ Backfill/upgrade outlet_sessions schema for existing DBs (fixes: "last_message_at does not exist")
   await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS last_message_at TEXT;
-  `);
-  await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS last_sender TEXT;
-  `);
-  await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0;
-  `);
-  await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS resolution_note TEXT;
-  `);
-  await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT;
-  `);
-  await q(`
-    ALTER TABLE outlet_sessions
-      ADD COLUMN IF NOT EXISTS resolved_at TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS risk_level INTEGER NOT NULL DEFAULT 0;
+
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_message_at TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_sender TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0;
+
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT;
+    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_at TEXT;
+
+    -- Make sure FK exists for resolved_by_user_id if it was added later (best-effort).
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM   pg_constraint
+        WHERE  conname = 'outlet_sessions_resolved_by_user_id_fkey'
+      ) THEN
+        ALTER TABLE outlet_sessions
+          ADD CONSTRAINT outlet_sessions_resolved_by_user_id_fkey
+          FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+      END IF;
+    EXCEPTION WHEN others THEN
+      -- ignore (constraint may already exist with a different name, or perms)
+      NULL;
+    END $$;
   `);
 
+  // Indexes
   await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
