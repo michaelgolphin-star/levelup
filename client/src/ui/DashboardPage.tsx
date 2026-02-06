@@ -1,7 +1,8 @@
+// client/src/ui/DashboardPage.tsx (FULL REPLACEMENT)
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
-import { api, apiGet, apiPost, apiPut, getToken } from "../lib/api";
+import { api, apiDelete, apiGet, apiPost, apiPut, getToken } from "../lib/api";
 
 type Org = { id: string; name: string };
 type User = { id: string; username: string; role: Role; orgId: string };
@@ -13,7 +14,14 @@ type Profile = {
   phone?: string | null;
   tags?: string[];
 };
-type Note = { id: string; orgId: string; userId: string; authorId: string; note: string; createdAt: string };
+type Note = {
+  id: string;
+  orgId: string;
+  userId: string;
+  authorId: string;
+  note: string;
+  createdAt: string;
+};
 
 type CheckIn = {
   id: string;
@@ -51,7 +59,7 @@ function Card({
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="text-lg font-semibold">{title}</div>
-          {subtitle && <div className="mt-1 text-sm text-white/60">{subtitle}</div>}
+          {subtitle ? <div className="mt-1 text-sm text-white/60">{subtitle}</div> : null}
         </div>
       </div>
       <div className="mt-4">{children}</div>
@@ -183,7 +191,12 @@ function tagsFromTagsJson(tagsJson?: string): string[] {
 
 async function downloadCsv(path: string, filename: string) {
   const token = getToken() || "";
-  const res = await fetch(path, {
+
+  // IMPORTANT: use same API base logic as lib/api.ts
+  const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
+  const url = path.startsWith("/") ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
+
+  const res = await fetch(url, {
     method: "GET",
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -195,14 +208,14 @@ async function downloadCsv(path: string, filename: string) {
   }
 
   const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const dlUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = dlUrl;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(dlUrl);
 }
 
 export default function DashboardPage() {
@@ -211,9 +224,9 @@ export default function DashboardPage() {
   const [auth, setAuth] = useState<AuthPayload | null>(null);
   const [org, setOrg] = useState<Org | null>(null);
 
-  const [tab, setTab] = useState<
-    "checkin" | "history" | "habits" | "patterns" | "org" | "trends"
-  >("checkin");
+  const [tab, setTab] = useState<"checkin" | "history" | "habits" | "patterns" | "org" | "trends">(
+    "checkin",
+  );
 
   const [checkins, setCheckins] = useState<CheckIn[]>([]);
   const [habits, setHabits] = useState<Habit[]>([]);
@@ -231,7 +244,6 @@ export default function DashboardPage() {
 
   const role = auth?.role;
   const isStaff = role === "admin" || role === "manager";
-  const isAdmin = role === "admin";
 
   const tabs = useMemo(() => {
     const base: { id: typeof tab; label: string }[] = [
@@ -250,12 +262,8 @@ export default function DashboardPage() {
       setLoading(true);
       setError(null);
 
-      const [c, h] = await Promise.all([
-        api.listCheckins(200),
-        api.listHabits(false),
-      ]);
+      const [c, h] = await Promise.all([api.listCheckins(200), api.listHabits(false)]);
 
-      // normalize to the local types
       setCheckins((c.checkins || []) as any);
       setHabits((h.habits || []) as any);
     } catch (e: any) {
@@ -273,7 +281,7 @@ export default function DashboardPage() {
 
         const o = await apiGet<{ org: Org }>("/api/org");
         setOrg(o.org);
-      } catch (e: any) {
+      } catch {
         // token missing/invalid
         setError(null);
         nav("/login");
@@ -288,7 +296,7 @@ export default function DashboardPage() {
   }, [auth]);
 
   function logout() {
-    // token key is handled by lib/api.ts. safest is to clear both if old keys exist.
+    // Token is stored under TOKEN_KEY in lib/api.ts; also clear legacy key.
     localStorage.removeItem("levelup_token");
     localStorage.removeItem("token");
     nav("/login");
@@ -310,9 +318,6 @@ export default function DashboardPage() {
       });
 
       setNote("");
-      // keep tagsCsv so it’s easy to reuse tags; change if you want:
-      // setTagsCsv("");
-
       await refreshData();
       setTab("history");
     } catch (e: any) {
@@ -393,9 +398,7 @@ export default function DashboardPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 p-5">
           <div>
             <div className="text-xl font-semibold">Level Up</div>
-            <div className="mt-1 text-sm text-white/60">
-              Daily structure • habits • honest reflection
-            </div>
+            <div className="mt-1 text-sm text-white/60">Daily structure • habits • honest reflection</div>
           </div>
           <div className="flex items-center gap-2">
             <Link to="/about" className="text-sm text-white/70 hover:text-white">
@@ -415,9 +418,7 @@ export default function DashboardPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-lg font-semibold">Dashboard</div>
-              <div className="mt-1 text-sm text-white/60">
-                Build self-trust through repetition.
-              </div>
+              <div className="mt-1 text-sm text-white/60">Build self-trust through repetition.</div>
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -434,33 +435,33 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {error && (
+        {error ? (
           <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
             {error}
           </div>
-        )}
+        ) : null}
 
-        {loading && (
+        {loading ? (
           <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
             Loading…
           </div>
-        )}
+        ) : null}
 
-        {!loading && tab === "org" && isStaff && (
+        {!loading && tab === "org" && isStaff ? (
           <div className="mt-6">
             <OrgPanel role={auth.role} myUserId={auth.userId} org={org} />
           </div>
-        )}
+        ) : null}
 
-        {!loading && tab !== "org" && (
+        {!loading && tab !== "org" ? (
           <div className="mt-6 grid gap-4">
-            {tab === "checkin" && <CheckInPanel />}
-            {tab === "history" && <HistoryPanel />}
-            {tab === "habits" && <HabitsPanel />}
-            {tab === "patterns" && <PatternsPanel />}
-            {tab === "trends" && isStaff && <TrendsPanel />}
+            {tab === "checkin" ? <CheckInPanel /> : null}
+            {tab === "history" ? <HistoryPanel /> : null}
+            {tab === "habits" ? <HabitsPanel /> : null}
+            {tab === "patterns" ? <PatternsPanel /> : null}
+            {tab === "trends" && isStaff ? <TrendsPanel /> : null}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
@@ -539,11 +540,7 @@ export default function DashboardPage() {
 
           <div className="grid gap-2">
             <div className="text-xs text-white/60">Tags (comma separated)</div>
-            <Input
-              value={tagsCsv}
-              onChange={setTagsCsv}
-              placeholder="workload, scheduling, conflict…"
-            />
+            <Input value={tagsCsv} onChange={setTagsCsv} placeholder="workload, scheduling, conflict…" />
           </div>
 
           <div className="grid gap-2">
@@ -581,9 +578,7 @@ export default function DashboardPage() {
                       <div className="mt-1 text-sm">
                         Mood <b>{c.mood}</b> • Energy <b>{c.energy}</b> • Stress <b>{c.stress}</b>
                       </div>
-                      {c.note ? (
-                        <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{c.note}</div>
-                      ) : null}
+                      {c.note ? <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{c.note}</div> : null}
                       {tags.length ? (
                         <div className="mt-2 flex flex-wrap gap-2">
                           {tags.map((t) => (
@@ -610,8 +605,12 @@ export default function DashboardPage() {
     return (
       <Card title="Habits" subtitle="Track the reps.">
         <div className="flex items-center gap-2">
-          <Button onClick={addHabit} disabled={saving}>Add habit</Button>
-          <Button variant="ghost" onClick={refreshData} disabled={loading || saving}>Refresh</Button>
+          <Button onClick={addHabit} disabled={saving}>
+            Add habit
+          </Button>
+          <Button variant="ghost" onClick={refreshData} disabled={loading || saving}>
+            Refresh
+          </Button>
         </div>
 
         <div className="mt-4 grid gap-3">
@@ -656,7 +655,9 @@ export default function DashboardPage() {
                 const r = await api.summary(30);
                 const s = r.summary;
                 alert(
-                  `Last ${s.days} days\nStreak: ${s.streak}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${s.overall.energyAvg ?? "—"}\nStress avg: ${s.overall.stressAvg ?? "—"}`,
+                  `Last ${s.days} days\nStreak: ${s.streak}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${
+                    s.overall.energyAvg ?? "—"
+                  }\nStress avg: ${s.overall.stressAvg ?? "—"}`,
                 );
               } catch (e: any) {
                 setError(e?.message || "Failed to load summary.");
@@ -684,7 +685,9 @@ export default function DashboardPage() {
                 const r = await api.orgSummary(30);
                 const s = r.summary;
                 alert(
-                  `Org (last ${s.days} days)\nUsers: ${s.overall.users}\nCheck-ins: ${s.overall.checkins}\nMood avg: ${s.overall.moodAvg ?? "—"}\nEnergy avg: ${s.overall.energyAvg ?? "—"}\nStress avg: ${s.overall.stressAvg ?? "—"}`,
+                  `Org (last ${s.days} days)\nUsers: ${s.overall.users}\nCheck-ins: ${s.overall.checkins}\nMood avg: ${
+                    s.overall.moodAvg ?? "—"
+                  }\nEnergy avg: ${s.overall.energyAvg ?? "—"}\nStress avg: ${s.overall.stressAvg ?? "—"}`,
                 );
               } catch (e: any) {
                 setError(e?.message || "Failed to load org summary.");
@@ -777,7 +780,12 @@ function OrgPanel({
         role: inviteRole,
         expiresInDays: days,
       });
-      setInviteUrl(`${location.origin}${r.urlPath}`);
+
+      // Respect API base (if set) rather than location.origin
+      const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
+      const base = API_BASE || location.origin;
+
+      setInviteUrl(`${base}${r.urlPath}`);
     } catch (e: any) {
       setMsg(e?.message || "Invite creation failed.");
     }
@@ -835,14 +843,12 @@ function OrgPanel({
           <Pill>Role: {role}</Pill>
         </div>
 
-        {msg && (
-          <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">
-            {msg}
-          </div>
-        )}
+        {msg ? (
+          <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">{msg}</div>
+        ) : null}
 
         {/* Admin-only tools: exports + invites */}
-        {isAdmin && (
+        {isAdmin ? (
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="text-sm font-semibold">Exports</div>
@@ -908,7 +914,7 @@ function OrgPanel({
 
                 <div className="flex gap-2">
                   <Button onClick={createInvite}>Create link</Button>
-                  {inviteUrl && (
+                  {inviteUrl ? (
                     <Button
                       variant="ghost"
                       onClick={() => {
@@ -918,20 +924,18 @@ function OrgPanel({
                     >
                       Copy
                     </Button>
-                  )}
+                  ) : null}
                 </div>
 
-                {inviteUrl && (
+                {inviteUrl ? (
                   <div className="rounded-xl border border-white/10 bg-black/20 p-2 text-xs text-white/70 break-all">
                     {inviteUrl}
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
-        )}
-
-        {!isAdmin && (
+        ) : (
           <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="text-sm font-semibold">Admin-only tools</div>
             <div className="mt-2 text-sm text-white/60">
@@ -999,12 +1003,10 @@ function OrgPanel({
             </div>
           </div>
 
-          {isAdmin && (
+          {isAdmin ? (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="text-sm font-semibold">Password reset (admin)</div>
-              <div className="mt-2 text-xs text-white/50">
-                Generates a temporary reset token (demo: shown on screen).
-              </div>
+              <div className="mt-2 text-xs text-white/50">Generates a temporary reset token (demo: shown on screen).</div>
 
               <div className="mt-3 grid gap-2">
                 <div>
@@ -1017,7 +1019,7 @@ function OrgPanel({
                 </div>
                 <div className="flex gap-2">
                   <Button onClick={generateReset}>Generate token</Button>
-                  {resetToken && (
+                  {resetToken ? (
                     <Button
                       variant="ghost"
                       onClick={() => {
@@ -1027,24 +1029,22 @@ function OrgPanel({
                     >
                       Copy
                     </Button>
-                  )}
+                  ) : null}
                 </div>
-                {resetToken && (
+                {resetToken ? (
                   <div className="rounded-xl border border-white/10 bg-black/20 p-2 text-xs text-white/70 break-all">
                     {resetToken}
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
-          )}
+          ) : null}
         </div>
 
         <div className="mt-4 grid gap-4 md:grid-cols-2">
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="text-sm font-semibold">Roster</div>
-            <div className="mt-2 text-xs text-white/50">
-              Click a user to view profile + (staff) notes.
-            </div>
+            <div className="mt-2 text-xs text-white/50">Click a user to view profile + (staff) notes.</div>
 
             <div className="mt-3 divide-y divide-white/10">
               {users.map((u) => (
@@ -1055,7 +1055,7 @@ function OrgPanel({
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {isAdmin && (
+                    {isAdmin ? (
                       <>
                         <Button variant="ghost" onClick={() => changeRole(u.id, "user")} disabled={u.role === "user"}>
                           user
@@ -1071,7 +1071,7 @@ function OrgPanel({
                           admin
                         </Button>
                       </>
-                    )}
+                    ) : null}
                     <Button variant="ghost" onClick={() => setSelectedId(u.id)}>
                       Open
                     </Button>
@@ -1091,7 +1091,7 @@ function OrgPanel({
                   Selected: {users.find((u) => u.id === selectedId)?.username || selectedId}
                 </div>
 
-                {isStaff && (
+                {isStaff ? (
                   <div className="grid gap-2">
                     <div className="text-xs text-white/60">Staff notes</div>
                     <TextArea value={noteText} onChange={setNoteText} placeholder="Add a note (staff only)..." />
@@ -1111,10 +1111,10 @@ function OrgPanel({
                           <div className="mt-1">{n.note}</div>
                         </div>
                       ))}
-                      {!selectedNotes.length && <div className="text-xs text-white/50">No notes yet.</div>}
+                      {!selectedNotes.length ? <div className="text-xs text-white/50">No notes yet.</div> : null}
                     </div>
                   </div>
-                )}
+                ) : null}
               </div>
             ) : (
               <div className="mt-3 text-sm text-white/60">No user selected.</div>
