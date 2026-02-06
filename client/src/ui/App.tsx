@@ -10,6 +10,7 @@ import InviteAcceptPage from "./InviteAcceptPage";
 import ResetPage from "./ResetPage";
 
 import { OutletHomePage, OutletSessionPage } from "./OutletPage";
+import { OutletInboxPage } from "./OutletInboxPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const token = getToken();
@@ -47,6 +48,9 @@ function Topbar() {
                   </Link>
                   <Link className={`topLink ${isActive("/outlet") ? "active" : ""}`} to="/outlet">
                     Counselor’s Office
+                  </Link>
+                  <Link className={`topLink ${isActive("/outlet/inbox") ? "active" : ""}`} to="/outlet/inbox">
+                    Inbox
                   </Link>
 
                   <button
@@ -100,6 +104,14 @@ export default function App() {
           element={
             <RequireAuth>
               <OutletHomePage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/outlet/inbox"
+          element={
+            <RequireAuth>
+              <OutletInboxPage />
             </RequireAuth>
           }
         />
