@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
   createOrg,
@@ -44,6 +44,18 @@ import {
   outletAnalyticsSummary,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
+
+/**
+ * Async route wrapper: prevents unhandled promise rejections
+ * and ensures Express receives errors via next(err).
+ */
+function wrap(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<any> | any,
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
 
 /**
  * NOTE: AI is stubbed here on purpose.
@@ -264,46 +276,52 @@ export function registerRoutes(app: Express) {
   // -----------------------------
   // Auth
   // -----------------------------
-  app.post("/api/auth/register", async (req, res) => {
-    const parsed = RegisterSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/auth/register",
+    wrap(async (req, res) => {
+      const parsed = RegisterSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const { username, password } = parsed.data;
-    const orgName = parsed.data.orgName?.trim() || "My Org";
+      const { username, password } = parsed.data;
+      const orgName = parsed.data.orgName?.trim() || "My Org";
 
-    const existing = await findUserByUsername(username);
-    if (existing) return res.status(409).json({ error: "Username already exists" });
+      const existing = await findUserByUsername(username);
+      if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const org = await createOrg(orgName);
-    const user = await createUser({ username, password, orgId: org.id, role: "admin" });
+      const org = await createOrg(orgName);
+      const user = await createUser({ username, password, orgId: org.id, role: "admin" });
 
-    const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
-    return res.json({
-      token,
-      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
-      org,
-    });
-  });
+      const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
+      return res.json({
+        token,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
+    }),
+  );
 
-  app.post("/api/auth/login", async (req, res) => {
-    const parsed = LoginSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/auth/login",
+    wrap(async (req, res) => {
+      const parsed = LoginSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const { username, password } = parsed.data;
-    const user = await findUserByUsername(username);
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+      const { username, password } = parsed.data;
+      const user = await findUserByUsername(username);
+      if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
-    const ok = verifyPassword(password, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+      const ok = verifyPassword(password, user.passwordHash);
+      if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    const org = await getOrg(user.orgId);
-    const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-    return res.json({
-      token,
-      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
-      org,
-    });
-  });
+      const org = await getOrg(user.orgId);
+      const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
+      return res.json({
+        token,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
+    }),
+  );
 
   // -----------------------------
   // Me
@@ -315,576 +333,719 @@ export function registerRoutes(app: Express) {
   // -----------------------------
   // Org + Users
   // -----------------------------
-  app.get("/api/org", requireAuth, async (req, res) => {
-    const org = await getOrg((req as any).auth!.orgId);
-    return res.json({ org });
-  });
+  app.get(
+    "/api/org",
+    requireAuth,
+    wrap(async (req, res) => {
+      const org = await getOrg((req as any).auth!.orgId);
+      return res.json({ org });
+    }),
+  );
 
   // Roster visibility (admin + manager)
-  app.get("/api/users", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const users = await listUsers((req as any).auth!.orgId);
-    return res.json({ users });
-  });
+  app.get(
+    "/api/users",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const users = await listUsers((req as any).auth!.orgId);
+      return res.json({ users });
+    }),
+  );
 
   // Admin-only role changes
-  app.post("/api/users/role", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const schema = z.object({ userId: z.string().min(3), role: z.enum(["user", "manager", "admin"]) });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/users/role",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const schema = z.object({ userId: z.string().min(3), role: z.enum(["user", "manager", "admin"]) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const ok = await setUserRole((req as any).auth!.orgId, parsed.data.userId, parsed.data.role);
-    return res.json({ ok });
-  });
+      const ok = await setUserRole((req as any).auth!.orgId, parsed.data.userId, parsed.data.role);
+      return res.json({ ok });
+    }),
+  );
 
   // Admin: create a user inside this org
-  app.post("/api/admin/users", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const schema = z.object({
-      username: z.string().min(3).max(40),
-      password: z.string().min(6).max(200),
-      role: z.enum(["user", "manager", "admin"]).default("user"),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/admin/users",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        username: z.string().min(3).max(40),
+        password: z.string().min(6).max(200),
+        role: z.enum(["user", "manager", "admin"]).default("user"),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const existing = await findUserByUsername(parsed.data.username);
-    if (existing) return res.status(409).json({ error: "Username already exists" });
+      const existing = await findUserByUsername(parsed.data.username);
+      if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const user = await createUser({
-      username: parsed.data.username,
-      password: parsed.data.password,
-      orgId: (req as any).auth!.orgId,
-      role: parsed.data.role,
-    });
+      const user = await createUser({
+        username: parsed.data.username,
+        password: parsed.data.password,
+        orgId: (req as any).auth!.orgId,
+        role: parsed.data.role,
+      });
 
-    return res.json({ user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role } });
-  });
+      return res.json({ user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role } });
+    }),
+  );
 
   // Admin: create an invite link (shareable)
-  app.post("/api/admin/invites", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const schema = z.object({
-      role: z.enum(["user", "manager", "admin"]).default("user"),
-      expiresInDays: z.number().int().min(1).max(30).default(7),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/admin/invites",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        role: z.enum(["user", "manager", "admin"]).default("user"),
+        expiresInDays: z.number().int().min(1).max(30).default(7),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const expiresAt = new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-    const invite = await createInvite({
-      orgId: (req as any).auth!.orgId,
-      role: parsed.data.role,
-      expiresAt,
-      createdBy: (req as any).auth!.userId,
-    });
-    return res.json({ invite, urlPath: `/invite/${invite.token}` });
-  });
+      const expiresAt = new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+      const invite = await createInvite({
+        orgId: (req as any).auth!.orgId,
+        role: parsed.data.role,
+        expiresAt,
+        createdBy: (req as any).auth!.userId,
+      });
+      return res.json({ invite, urlPath: `/invite/${invite.token}` });
+    }),
+  );
 
   // Public: validate invite token
-  app.get("/api/invites/:token", async (req, res) => {
-    const token = String(req.params.token || "");
-    const invite = await getInvite(token);
-    if (!invite) return res.status(404).json({ error: "Invite not found" });
-    if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
-    const org = await getOrg(invite.orgId);
-    return res.json({ invite: { token: invite.token, role: invite.role, expiresAt: invite.expiresAt }, org });
-  });
+  app.get(
+    "/api/invites/:token",
+    wrap(async (req, res) => {
+      const token = String(req.params.token || "");
+      const invite = await getInvite(token);
+      if (!invite) return res.status(404).json({ error: "Invite not found" });
+      if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
+      const org = await getOrg(invite.orgId);
+      return res.json({ invite: { token: invite.token, role: invite.role, expiresAt: invite.expiresAt }, org });
+    }),
+  );
 
   // Public: accept invite (creates user in that org)
-  app.post("/api/invites/:token/accept", async (req, res) => {
-    const token = String(req.params.token || "");
-    const invite = await getInvite(token);
-    if (!invite) return res.status(404).json({ error: "Invite not found" });
-    if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
+  app.post(
+    "/api/invites/:token/accept",
+    wrap(async (req, res) => {
+      const token = String(req.params.token || "");
+      const invite = await getInvite(token);
+      if (!invite) return res.status(404).json({ error: "Invite not found" });
+      if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
 
-    const schema = z.object({
-      username: z.string().min(3).max(40),
-      password: z.string().min(6).max(200),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const schema = z.object({
+        username: z.string().min(3).max(40),
+        password: z.string().min(6).max(200),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const existing = await findUserByUsername(parsed.data.username);
-    if (existing) return res.status(409).json({ error: "Username already exists" });
+      const existing = await findUserByUsername(parsed.data.username);
+      if (existing) return res.status(409).json({ error: "Username already exists" });
 
-    const user = await createUser({
-      username: parsed.data.username,
-      password: parsed.data.password,
-      orgId: invite.orgId,
-      role: invite.role,
-    });
+      const user = await createUser({
+        username: parsed.data.username,
+        password: parsed.data.password,
+        orgId: invite.orgId,
+        role: invite.role,
+      });
 
-    await deleteInvite(token);
+      await deleteInvite(token);
 
-    const org = await getOrg(invite.orgId);
-    const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-    return res.json({
-      token: jwt,
-      user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
-      org,
-    });
-  });
+      const org = await getOrg(invite.orgId);
+      const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
+      return res.json({
+        token: jwt,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
+    }),
+  );
 
   // Auth: request password reset (demo - returns token directly)
-  app.post("/api/auth/request-reset", async (req, res) => {
-    const schema = z.object({ username: z.string().min(3).max(40) });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/auth/request-reset",
+    wrap(async (req, res) => {
+      const schema = z.object({ username: z.string().min(3).max(40) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const user = await findUserByUsername(parsed.data.username);
-    if (!user) return res.status(404).json({ error: "User not found" });
+      const user = await findUserByUsername(parsed.data.username);
+      if (!user) return res.status(404).json({ error: "User not found" });
 
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-    const reset = await createPasswordReset({ orgId: user.orgId, userId: user.id, expiresAt, createdBy: user.id });
-    return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
-  });
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+      const reset = await createPasswordReset({ orgId: user.orgId, userId: user.id, expiresAt, createdBy: user.id });
+      return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
+    }),
+  );
 
   // Auth: reset password using token
-  app.post("/api/auth/reset", async (req, res) => {
-    const schema = z.object({ token: z.string().min(10), newPassword: z.string().min(6).max(200) });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/auth/reset",
+    wrap(async (req, res) => {
+      const schema = z.object({ token: z.string().min(10), newPassword: z.string().min(6).max(200) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const reset = await getPasswordReset(parsed.data.token);
-    if (!reset) return res.status(404).json({ error: "Reset token not found" });
-    if (new Date(reset.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Reset token expired" });
+      const reset = await getPasswordReset(parsed.data.token);
+      if (!reset) return res.status(404).json({ error: "Reset token not found" });
+      if (new Date(reset.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Reset token expired" });
 
-    await setUserPassword(reset.userId, parsed.data.newPassword);
-    await deletePasswordReset(reset.token);
-    return res.json({ ok: true });
-  });
+      await setUserPassword(reset.userId, parsed.data.newPassword);
+      await deletePasswordReset(reset.token);
+      return res.json({ ok: true });
+    }),
+  );
 
   // Admin: generate reset token for a user (returns token directly)
-  app.post("/api/admin/users/:id/reset-token", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const userId = String(req.params.id || "");
-    const schema = z.object({ expiresInMinutes: z.number().int().min(10).max(1440).default(60) });
-    const parsed = schema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/admin/users/:id/reset-token",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const userId = String(req.params.id || "");
+      const schema = z.object({ expiresInMinutes: z.number().int().min(10).max(1440).default(60) });
+      const parsed = schema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const expiresAt = new Date(Date.now() + parsed.data.expiresInMinutes * 60 * 1000).toISOString();
-    const reset = await createPasswordReset({
-      orgId: (req as any).auth!.orgId,
-      userId,
-      expiresAt,
-      createdBy: (req as any).auth!.userId,
-    });
-    return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
-  });
+      const expiresAt = new Date(Date.now() + parsed.data.expiresInMinutes * 60 * 1000).toISOString();
+      const reset = await createPasswordReset({
+        orgId: (req as any).auth!.orgId,
+        userId,
+        expiresAt,
+        createdBy: (req as any).auth!.userId,
+      });
+      return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
+    }),
+  );
 
   // -----------------------------
   // Profiles
   // -----------------------------
-  app.get("/api/users/:id/profile", requireAuth, async (req, res) => {
-    const userId = String(req.params.id || "");
-    const auth = (req as any).auth!;
-    const isSelf = userId === auth.userId;
-    const isStaff = auth.role === "admin" || auth.role === "manager";
-    if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
+  app.get(
+    "/api/users/:id/profile",
+    requireAuth,
+    wrap(async (req, res) => {
+      const userId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const isSelf = userId === auth.userId;
+      const isStaff = auth.role === "admin" || auth.role === "manager";
+      if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
 
-    const profile = await getUserProfile(auth.orgId, userId);
-    return res.json({ profile });
-  });
+      const profile = await getUserProfile(auth.orgId, userId);
+      return res.json({ profile });
+    }),
+  );
 
-  app.put("/api/users/:id/profile", requireAuth, async (req, res) => {
-    const userId = String(req.params.id || "");
-    const auth = (req as any).auth!;
-    const isSelf = userId === auth.userId;
-    const isStaff = auth.role === "admin" || auth.role === "manager";
-    if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
+  app.put(
+    "/api/users/:id/profile",
+    requireAuth,
+    wrap(async (req, res) => {
+      const userId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const isSelf = userId === auth.userId;
+      const isStaff = auth.role === "admin" || auth.role === "manager";
+      if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
 
-    const schema = z.object({
-      fullName: z.string().max(80).optional().nullable(),
-      email: z.string().max(120).optional().nullable(),
-      phone: z.string().max(40).optional().nullable(),
-      tags: z.array(z.string().max(24)).max(30).optional(),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const schema = z.object({
+        fullName: z.string().max(80).optional().nullable(),
+        email: z.string().max(120).optional().nullable(),
+        phone: z.string().max(40).optional().nullable(),
+        tags: z.array(z.string().max(24)).max(30).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const profile = await upsertUserProfile({
-      orgId: auth.orgId,
-      userId,
-      fullName: parsed.data.fullName,
-      email: parsed.data.email,
-      phone: parsed.data.phone,
-      tags: parsed.data.tags,
-    });
-    return res.json({ profile });
-  });
+      const profile = await upsertUserProfile({
+        orgId: auth.orgId,
+        userId,
+        fullName: parsed.data.fullName,
+        email: parsed.data.email,
+        phone: parsed.data.phone,
+        tags: parsed.data.tags,
+      });
+      return res.json({ profile });
+    }),
+  );
 
   // -----------------------------
   // Notes (staff only)
   // -----------------------------
-  app.get("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const userId = String(req.params.id || "");
-    const schema = z.object({ limit: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/users/:id/notes",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const userId = String(req.params.id || "");
+      const schema = z.object({ limit: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
 
-    const notes = await listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
-    return res.json({ notes });
-  });
+      const notes = await listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
+      return res.json({ notes });
+    }),
+  );
 
-  app.post("/api/users/:id/notes", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const userId = String(req.params.id || "");
-    const schema = z.object({ note: z.string().min(1).max(2000) });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/users/:id/notes",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const userId = String(req.params.id || "");
+      const schema = z.object({ note: z.string().min(1).max(2000) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const n = await addUserNote({
-      orgId: (req as any).auth!.orgId,
-      userId,
-      authorId: (req as any).auth!.userId,
-      note: parsed.data.note,
-    });
-    return res.json({ note: n });
-  });
+      const n = await addUserNote({
+        orgId: (req as any).auth!.orgId,
+        userId,
+        authorId: (req as any).auth!.userId,
+        note: parsed.data.note,
+      });
+      return res.json({ note: n });
+    }),
+  );
 
   // -----------------------------
   // Outlet / Grievance Office ✅
   // -----------------------------
 
   // Employee: create a new outlet session
-  app.post("/api/outlet/sessions", requireAuth, async (req, res) => {
-    const parsed = OutletCreateSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/outlet/sessions",
+    requireAuth,
+    wrap(async (req, res) => {
+      const parsed = OutletCreateSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const session = await createOutletSession({
-      orgId: auth.orgId,
-      userId: auth.userId,
-      category: parsed.data.category ?? null,
-      visibility: parsed.data.visibility,
-      riskLevel: 0,
-    });
+      const auth = (req as any).auth!;
+      const session = await createOutletSession({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        category: parsed.data.category ?? null,
+        visibility: parsed.data.visibility,
+        riskLevel: 0,
+      });
 
-    return res.json({ session });
-  });
+      return res.json({ session });
+    }),
+  );
 
   // Employee: list my outlet sessions (staff can request staff view via ?view=staff)
-  app.get("/api/outlet/sessions", requireAuth, async (req, res) => {
-    const schema = z.object({ limit: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/outlet/sessions",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({ limit: z.string().optional(), view: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
 
-    const view = String((req.query as any).view || "");
-    if (view === "staff" && (auth.role === "admin" || auth.role === "manager")) {
-      const sessions = await listOutletSessionsForStaff({
-        orgId: auth.orgId,
-        role: auth.role,
-        staffUserId: auth.userId,
-        limit: Math.max(limit, 100),
-      });
+      const view = String(parsed.data.view || "");
+      if (view === "staff" && (auth.role === "admin" || auth.role === "manager")) {
+        const sessions = await listOutletSessionsForStaff({
+          orgId: auth.orgId,
+          role: auth.role,
+          staffUserId: auth.userId,
+          limit: Math.max(limit, 100),
+        });
+        return res.json({ sessions });
+      }
+
+      const sessions = await listOutletSessionsForUser({ orgId: auth.orgId, userId: auth.userId, limit });
       return res.json({ sessions });
-    }
-
-    const sessions = await listOutletSessionsForUser({ orgId: auth.orgId, userId: auth.userId, limit });
-    return res.json({ sessions });
-  });
+    }),
+  );
 
   // Get a session + messages (RBAC enforced)
-  app.get("/api/outlet/sessions/:id", requireAuth, async (req, res) => {
-    const sessionId = String(req.params.id || "");
-    const auth = (req as any).auth!;
+  app.get(
+    "/api/outlet/sessions/:id",
+    requireAuth,
+    wrap(async (req, res) => {
+      const sessionId = String(req.params.id || "");
+      const auth = (req as any).auth!;
 
-    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
-    if (!session) return res.status(404).json({ error: "Session not found" });
+      const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+      if (!session) return res.status(404).json({ error: "Session not found" });
 
-    const isOwner = session.userId === auth.userId;
-    const isStaff = auth.role === "admin" || auth.role === "manager";
+      const isOwner = session.userId === auth.userId;
+      const isStaff = auth.role === "admin" || auth.role === "manager";
 
-    if (!isOwner) {
-      if (!isStaff) return res.status(403).json({ error: "Forbidden" });
+      if (!isOwner) {
+        if (!isStaff) return res.status(403).json({ error: "Forbidden" });
 
+        const vis = String(session.visibility || "private");
+        const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
+        if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const messages = await listOutletMessages({ orgId: auth.orgId, sessionId });
+      return res.json({ session, messages });
+    }),
+  );
+
+  // Post a user message -> store -> generate AI reply -> store (owner only)
+  app.post(
+    "/api/outlet/sessions/:id/messages",
+    requireAuth,
+    wrap(async (req, res) => {
+      const sessionId = String(req.params.id || "");
+      const parsed = OutletMessageSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      if (session.userId !== auth.userId) return res.status(403).json({ error: "Forbidden" });
+
+      const userMsg = await addOutletMessage({
+        orgId: auth.orgId,
+        sessionId,
+        sender: "user",
+        content: parsed.data.content,
+      });
+
+      const ai = await generateOutletAiReply({
+        userMessage: parsed.data.content,
+        category: session.category ?? null,
+        visibility: session.visibility,
+      });
+
+      const aiMsg = await addOutletMessage({
+        orgId: auth.orgId,
+        sessionId,
+        sender: "ai",
+        content: ai.reply,
+      });
+
+      // If risk triggers, escalate to admin (MVP behavior)
+      if (ai.riskLevel >= 2) {
+        await escalateOutletSession({
+          orgId: auth.orgId,
+          sessionId,
+          escalatedToRole: "admin",
+          assignedToUserId: null,
+          reason: "Auto-flag: safety/risk keywords detected.",
+        });
+      }
+
+      return res.json({ userMessage: userMsg, aiMessage: aiMsg, riskLevel: ai.riskLevel });
+    }),
+  );
+
+  // Staff or owner: escalate a session (manager/admin)
+  app.post(
+    "/api/outlet/sessions/:id/escalate",
+    requireAuth,
+    wrap(async (req, res) => {
+      const sessionId = String(req.params.id || "");
+      const parsed = OutletEscalateSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      const isOwner = session.userId === auth.userId;
+      const isStaff = auth.role === "admin" || auth.role === "manager";
+      if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
+
+      const esc = await escalateOutletSession({
+        orgId: auth.orgId,
+        sessionId,
+        escalatedToRole: parsed.data.escalatedToRole,
+        assignedToUserId: parsed.data.assignedToUserId ?? null,
+        reason: parsed.data.reason ?? null,
+      });
+
+      return res.json({ escalation: esc });
+    }),
+  );
+
+  // Close a session (owner or staff)
+  app.post(
+    "/api/outlet/sessions/:id/close",
+    requireAuth,
+    wrap(async (req, res) => {
+      const sessionId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+
+      const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      const isOwner = session.userId === auth.userId;
+      const isStaff = auth.role === "admin" || auth.role === "manager";
+      if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
+
+      const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
+      return res.json({ ok: !!ok });
+    }),
+  );
+
+  // Staff: resolve w/ a short note (manager/admin)
+  app.post(
+    "/api/outlet/sessions/:id/resolve",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const sessionId = String(req.params.id || "");
+      const parsed = OutletResolveSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const session = await getOutletSession({ orgId: auth.orgId, sessionId });
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      // Staff can only resolve sessions they are allowed to view
       const vis = String(session.visibility || "private");
       const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
       if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
-    }
 
-    const messages = await listOutletMessages({ orgId: auth.orgId, sessionId });
-    return res.json({ session, messages });
-  });
-
-  // Post a user message -> store -> generate AI reply -> store (owner only)
-  app.post("/api/outlet/sessions/:id/messages", requireAuth, async (req, res) => {
-    const sessionId = String(req.params.id || "");
-    const parsed = OutletMessageSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-    const auth = (req as any).auth!;
-    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
-    if (!session) return res.status(404).json({ error: "Session not found" });
-
-    if (session.userId !== auth.userId) return res.status(403).json({ error: "Forbidden" });
-
-    const userMsg = await addOutletMessage({
-      orgId: auth.orgId,
-      sessionId,
-      sender: "user",
-      content: parsed.data.content,
-    });
-
-    const ai = await generateOutletAiReply({
-      userMessage: parsed.data.content,
-      category: session.category ?? null,
-      visibility: session.visibility,
-    });
-
-    const aiMsg = await addOutletMessage({
-      orgId: auth.orgId,
-      sessionId,
-      sender: "ai",
-      content: ai.reply,
-    });
-
-    // If risk triggers, escalate to admin (MVP behavior)
-    if (ai.riskLevel >= 2) {
-      await escalateOutletSession({
+      const ok = await resolveOutletSession({
         orgId: auth.orgId,
         sessionId,
-        escalatedToRole: "admin",
-        assignedToUserId: null,
-        reason: "Auto-flag: safety/risk keywords detected.",
+        resolvedByUserId: auth.userId,
+        resolutionNote: parsed.data.resolutionNote ?? null,
       });
-    }
 
-    return res.json({ userMessage: userMsg, aiMessage: aiMsg, riskLevel: ai.riskLevel });
-  });
-
-  // Staff or owner: escalate a session (manager/admin)
-  app.post("/api/outlet/sessions/:id/escalate", requireAuth, async (req, res) => {
-    const sessionId = String(req.params.id || "");
-    const parsed = OutletEscalateSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-    const auth = (req as any).auth!;
-    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
-    if (!session) return res.status(404).json({ error: "Session not found" });
-
-    const isOwner = session.userId === auth.userId;
-    const isStaff = auth.role === "admin" || auth.role === "manager";
-    if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
-
-    const esc = await escalateOutletSession({
-      orgId: auth.orgId,
-      sessionId,
-      escalatedToRole: parsed.data.escalatedToRole,
-      assignedToUserId: parsed.data.assignedToUserId ?? null,
-      reason: parsed.data.reason ?? null,
-    });
-
-    return res.json({ escalation: esc });
-  });
-
-  // Close a session (owner or staff)
-  app.post("/api/outlet/sessions/:id/close", requireAuth, async (req, res) => {
-    const sessionId = String(req.params.id || "");
-    const auth = (req as any).auth!;
-
-    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
-    if (!session) return res.status(404).json({ error: "Session not found" });
-
-    const isOwner = session.userId === auth.userId;
-    const isStaff = auth.role === "admin" || auth.role === "manager";
-    if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
-
-    const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
-    return res.json({ ok: !!ok });
-  });
-
-  // Staff: resolve w/ a short note (manager/admin)
-  app.post("/api/outlet/sessions/:id/resolve", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const sessionId = String(req.params.id || "");
-    const parsed = OutletResolveSchema.safeParse(req.body || {});
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-    const auth = (req as any).auth!;
-    const session = await getOutletSession({ orgId: auth.orgId, sessionId });
-    if (!session) return res.status(404).json({ error: "Session not found" });
-
-    // Staff can only resolve sessions they are allowed to view
-    const vis = String(session.visibility || "private");
-    const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
-    if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
-
-    const ok = await resolveOutletSession({
-      orgId: auth.orgId,
-      sessionId,
-      resolvedByUserId: auth.userId,
-      resolutionNote: parsed.data.resolutionNote ?? null,
-    });
-
-    return res.json({ ok: !!ok });
-  });
+      return res.json({ ok: !!ok });
+    }),
+  );
 
   // Staff analytics for Counselor’s Office (manager/admin)
-  app.get("/api/outlet/analytics/summary", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const schema = z.object({ days: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/outlet/analytics/summary",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const schema = z.object({ days: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
-    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+      const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+      const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
 
-    const summary = await outletAnalyticsSummary({ orgId: (req as any).auth!.orgId, days });
-    return res.json({ summary });
-  });
+      const summary = await outletAnalyticsSummary({ orgId: (req as any).auth!.orgId, days });
+      return res.json({ summary });
+    }),
+  );
 
   // -----------------------------
   // Exports (CSV): ADMIN ONLY ✅
   // -----------------------------
-  app.get("/api/export/checkins.csv", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const schema = z.object({
-      userId: z.string().optional(),
-      sinceDays: z.string().optional(),
-    });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/export/checkins.csv",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        userId: z.string().optional(),
+        sinceDays: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    let sinceDayKey: string | undefined = undefined;
-    if (parsed.data.sinceDays) {
-      const n = Number(parsed.data.sinceDays);
-      const days = Number.isFinite(n) ? Math.max(1, Math.min(n, 365)) : 30;
-      sinceDayKey = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    }
+      let sinceDayKey: string | undefined = undefined;
+      if (parsed.data.sinceDays) {
+        const n = Number(parsed.data.sinceDays);
+        const days = Number.isFinite(n) ? Math.max(1, Math.min(n, 365)) : 30;
+        sinceDayKey = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      }
 
-    const csv = await exportCheckinsCsv({
-      orgId: (req as any).auth!.orgId,
-      userId: parsed.data.userId,
-      sinceDayKey,
-    });
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="checkins.csv"');
-    return res.send(csv);
-  });
+      const csv = await exportCheckinsCsv({
+        orgId: (req as any).auth!.orgId,
+        userId: parsed.data.userId,
+        sinceDayKey,
+      });
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="checkins.csv"');
+      return res.send(csv);
+    }),
+  );
 
-  app.get("/api/export/users.csv", requireAuth, requireRole(["admin"]), async (req, res) => {
-    const csv = await exportUsersCsv({ orgId: (req as any).auth!.orgId });
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="users.csv"');
-    return res.send(csv);
-  });
+  app.get(
+    "/api/export/users.csv",
+    requireAuth,
+    requireRole(["admin"]),
+    wrap(async (req, res) => {
+      const csv = await exportUsersCsv({ orgId: (req as any).auth!.orgId });
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="users.csv"');
+      return res.send(csv);
+    }),
+  );
 
   // -----------------------------
   // Check-ins
   // -----------------------------
-  app.post("/api/checkins", requireAuth, async (req, res) => {
-    const parsed = CheckInSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/checkins",
+    requireAuth,
+    wrap(async (req, res) => {
+      const parsed = CheckInSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const checkin = await createCheckIn({
-      orgId: auth.orgId,
-      userId: auth.userId,
-      ts: parsed.data.ts,
-      mood: parsed.data.mood,
-      energy: parsed.data.energy,
-      stress: parsed.data.stress,
-      note: parsed.data.note ?? null,
-      tags: parsed.data.tags ?? [],
-    });
+      const auth = (req as any).auth!;
+      const checkin = await createCheckIn({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        ts: parsed.data.ts,
+        mood: parsed.data.mood,
+        energy: parsed.data.energy,
+        stress: parsed.data.stress,
+        note: parsed.data.note ?? null,
+        tags: parsed.data.tags ?? [],
+      });
 
-    return res.json({ checkin });
-  });
+      return res.json({ checkin });
+    }),
+  );
 
-  app.get("/api/checkins", requireAuth, async (req, res) => {
-    const schema = z.object({
-      dayKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      limit: z.string().optional(),
-    });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/checkins",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({
+        dayKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        limit: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 200;
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 200;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
 
-    const checkins = await listCheckIns({
-      orgId: auth.orgId,
-      userId: auth.userId,
-      dayKey: parsed.data.dayKey,
-      limit,
-    });
-    return res.json({ checkins });
-  });
+      const checkins = await listCheckIns({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        dayKey: parsed.data.dayKey,
+        limit,
+      });
+      return res.json({ checkins });
+    }),
+  );
 
-  app.delete("/api/checkins/:id", requireAuth, async (req, res) => {
-    const id = String(req.params.id || "");
-    const auth = (req as any).auth!;
-    const ok = await deleteCheckIn(auth.orgId, auth.userId, id);
-    return res.json({ ok });
-  });
+  app.delete(
+    "/api/checkins/:id",
+    requireAuth,
+    wrap(async (req, res) => {
+      const id = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await deleteCheckIn(auth.orgId, auth.userId, id);
+      return res.json({ ok });
+    }),
+  );
 
   // -----------------------------
   // Habits
   // -----------------------------
-  app.post("/api/habits", requireAuth, async (req, res) => {
-    const parsed = HabitSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.post(
+    "/api/habits",
+    requireAuth,
+    wrap(async (req, res) => {
+      const parsed = HabitSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const habit = await createHabit({
-      orgId: auth.orgId,
-      userId: auth.userId,
-      name: parsed.data.name,
-      targetPerWeek: parsed.data.targetPerWeek,
-    });
+      const auth = (req as any).auth!;
+      const habit = await createHabit({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        name: parsed.data.name,
+        targetPerWeek: parsed.data.targetPerWeek,
+      });
 
-    return res.json({ habit });
-  });
+      return res.json({ habit });
+    }),
+  );
 
-  app.get("/api/habits", requireAuth, async (req, res) => {
-    const schema = z.object({ includeArchived: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/habits",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({ includeArchived: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const habits = await listHabits({
-      orgId: auth.orgId,
-      userId: auth.userId,
-      includeArchived: parsed.data.includeArchived === "1",
-    });
+      const auth = (req as any).auth!;
+      const habits = await listHabits({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        includeArchived: parsed.data.includeArchived === "1",
+      });
 
-    return res.json({ habits });
-  });
+      return res.json({ habits });
+    }),
+  );
 
-  app.post("/api/habits/:id/archive", requireAuth, async (req, res) => {
-    const id = String(req.params.id || "");
-    const auth = (req as any).auth!;
-    const ok = await archiveHabit(auth.orgId, auth.userId, id);
-    return res.json({ ok });
-  });
+  app.post(
+    "/api/habits/:id/archive",
+    requireAuth,
+    wrap(async (req, res) => {
+      const id = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await archiveHabit(auth.orgId, auth.userId, id);
+      return res.json({ ok });
+    }),
+  );
 
   // -----------------------------
   // Analytics
   // -----------------------------
-  app.get("/api/analytics/org-summary", requireAuth, requireRole(["admin", "manager"]), async (req, res) => {
-    const schema = z.object({ days: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/analytics/org-summary",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const schema = z.object({ days: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
-    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+      const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+      const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
 
-    const summary = await orgSummary({ orgId: (req as any).auth!.orgId, days });
-    return res.json({ summary });
-  });
+      const summary = await orgSummary({ orgId: (req as any).auth!.orgId, days });
+      return res.json({ summary });
+    }),
+  );
 
-  app.get("/api/analytics/summary", requireAuth, async (req, res) => {
-    const schema = z.object({ days: z.string().optional() });
-    const parsed = schema.safeParse(req.query);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  app.get(
+    "/api/analytics/summary",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({ days: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-    const auth = (req as any).auth!;
-    const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
-    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
+      const auth = (req as any).auth!;
+      const daysRaw = parsed.data.days ? Number(parsed.data.days) : 30;
+      const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(daysRaw, 365)) : 30;
 
-    const summary = await summaryForUser({ orgId: auth.orgId, userId: auth.userId, days });
-    return res.json({ summary });
+      const summary = await summaryForUser({ orgId: auth.orgId, userId: auth.userId, days });
+      return res.json({ summary });
+    }),
+  );
+
+  // Last: JSON error response (keeps pilot UX clean)
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error("API error:", err);
+    const msg = typeof err?.message === "string" ? err.message : "Server error";
+    return res.status(500).json({ error: msg });
   });
 }
