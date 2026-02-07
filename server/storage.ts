@@ -1,5 +1,4 @@
 // server/storage.ts (FULL REPLACEMENT)
-
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -22,7 +21,8 @@ if (!DATABASE_URL) {
 // - if PGSSLMODE=require OR URL includes sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
+  DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -32,6 +32,18 @@ const pool = new Pool({
 async function q<T = any>(text: string, params: any[] = []) {
   const res = await pool.query(text, params);
   return res.rows as T[];
+}
+
+/**
+ * pg does NOT allow multiple SQL commands in one prepared statement.
+ * So we execute statements one-by-one.
+ */
+async function execMany(statements: string[]) {
+  for (const s of statements) {
+    const sql = s.trim();
+    if (!sql) continue;
+    await q(sql);
+  }
 }
 
 function nowIso() {
@@ -61,7 +73,7 @@ function normalizeTags(tags: any): string[] {
 
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
+export type OutletStatus = "open" | "escalated" | "closed";
 export type OutletSender = "user" | "ai" | "staff";
 
 function normalizeVisibility(v: any): OutletVisibility {
@@ -73,7 +85,6 @@ function normalizeVisibility(v: any): OutletVisibility {
 
 function normalizeStatus(v: any): OutletStatus {
   const s = String(v || "").toLowerCase();
-  if (s === "resolved") return "resolved";
   if (s === "escalated") return "escalated";
   if (s === "closed") return "closed";
   return "open";
@@ -91,18 +102,22 @@ function normalizeSender(v: any): OutletSender {
  * - Creates tables if missing
  * - Migrates existing tables safely using ADD COLUMN IF NOT EXISTS
  * - Creates indexes only after columns are guaranteed to exist
+ *
+ * IMPORTANT: We run statements one-by-one to avoid:
+ * "cannot insert multiple commands into a prepared statement"
  */
 export async function ensureDb() {
-  const bootNow = nowIso();
+  const now = nowIso();
 
-  // 1) Base tables
-  await q(`
+  // 1) Base tables (one statement each)
+  await execMany([
+    `
     CREATE TABLE IF NOT EXISTS orgs (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
@@ -110,8 +125,8 @@ export async function ensureDb() {
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS checkins (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -124,8 +139,8 @@ export async function ensureDb() {
       note TEXT,
       tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS habits (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -134,8 +149,8 @@ export async function ensureDb() {
       target_per_week INTEGER NOT NULL,
       archived_at TEXT,
       created_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS invites (
       token TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -143,8 +158,8 @@ export async function ensureDb() {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS password_resets (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -152,8 +167,8 @@ export async function ensureDb() {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS user_profiles (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -163,8 +178,8 @@ export async function ensureDb() {
       tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS user_notes (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -173,9 +188,8 @@ export async function ensureDb() {
       ts TEXT NOT NULL,
       note TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );
-
-    -- Counselor’s Office / outlet sessions (table may exist from older builds)
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -192,8 +206,8 @@ export async function ensureDb() {
       resolved_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS outlet_messages (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -201,8 +215,8 @@ export async function ensureDb() {
       sender TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );
-
+    )`,
+    `
     CREATE TABLE IF NOT EXISTS outlet_escalations (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -211,63 +225,60 @@ export async function ensureDb() {
       assigned_to_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
       reason TEXT,
       created_at TEXT NOT NULL
-    );
-  `);
+    )`,
+  ]);
 
-  // 2) Migration safety
-  await q(`
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS status TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS risk_level INTEGER;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_message_at TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_sender TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolution_note TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_at TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS created_at TEXT;
-    ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT;
-  `);
+  // 2) Migration safety: add missing columns (each statement separately)
+  await execMany([
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS status TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS risk_level INTEGER`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_message_at TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS last_sender TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolution_note TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_by_user_id TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_at TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS created_at TEXT`,
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT`,
+  ]);
 
-  // Defaults for any legacy rows
-  await q(
-    `
-    UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private');
-    UPDATE outlet_sessions SET status = COALESCE(status, 'open');
-    UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0);
-    UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0);
-    UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, $1);
-    UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, $1);
-    `,
-    [bootNow],
-  );
+  // Defaults for existing rows where columns were just added
+  await execMany([
+    `UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`,
+    `UPDATE outlet_sessions SET status = COALESCE(status, 'open')`,
+    `UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`,
+    `UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0)`,
+    `UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, '${now}')`,
+    `UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, '${now}')`,
+  ]);
 
-  // 3) Indexes
-  await q(`
-    CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
-    CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
-    CREATE INDEX IF NOT EXISTS idx_checkins_user_ts ON checkins(user_id, ts);
+  // 3) Indexes (one statement each)
+  await execMany([
+    `CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key)`,
+    `CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key)`,
+    `CREATE INDEX IF NOT EXISTS idx_checkins_user_ts ON checkins(user_id, ts)`,
 
-    CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id, archived_at);
+    `CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id, archived_at)`,
 
-    CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id, expires_at);
-    CREATE INDEX IF NOT EXISTS idx_pwreset_user ON password_resets(user_id, expires_at);
+    `CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id, expires_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_pwreset_user ON password_resets(user_id, expires_at)`,
 
-    CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id);
+    `CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id)`,
 
-    CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts);
+    `CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts)`,
 
-    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility);
-    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_status ON outlet_sessions(org_id, status);
-    CREATE INDEX IF NOT EXISTS idx_outlet_sessions_lastmsg ON outlet_sessions(org_id, last_message_at DESC);
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility)`,
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_status ON outlet_sessions(org_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_lastmsg ON outlet_sessions(org_id, last_message_at DESC)`,
 
-    CREATE INDEX IF NOT EXISTS idx_outlet_messages_session_created ON outlet_messages(session_id, created_at ASC);
+    `CREATE INDEX IF NOT EXISTS idx_outlet_messages_session_created ON outlet_messages(session_id, created_at ASC)`,
 
-    CREATE INDEX IF NOT EXISTS idx_outlet_escalations_session ON outlet_escalations(session_id, created_at DESC);
-  `);
+    `CREATE INDEX IF NOT EXISTS idx_outlet_escalations_session ON outlet_escalations(session_id, created_at DESC)`,
+  ]);
 }
 
 /** Orgs */
@@ -340,7 +351,13 @@ export async function listUsers(orgId: string) {
     "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
     [orgId],
   );
-  return rows.map((r) => ({ id: r.id, username: r.username, orgId: r.org_id, role: r.role as Role, createdAt: r.created_at }));
+  return rows.map((r) => ({
+    id: r.id,
+    username: r.username,
+    orgId: r.org_id,
+    role: r.role as Role,
+    createdAt: r.created_at,
+  }));
 }
 
 export async function setUserRole(orgId: string, userId: string, role: Role) {
@@ -522,8 +539,6 @@ export async function summaryForUser(params: { orgId: string; userId: string; da
     else break;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-
   const overallRows = await q<any>(
     `SELECT AVG(mood)::float as mood_avg,
             AVG(energy)::float as energy_avg,
@@ -534,6 +549,8 @@ export async function summaryForUser(params: { orgId: string; userId: string; da
     [params.orgId, params.userId],
   );
   const overall = overallRows[0] || {};
+
+  const today = new Date().toISOString().slice(0, 10);
 
   return {
     days,
@@ -643,7 +660,6 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as sessions_open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as sessions_escalated,
       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as sessions_closed,
-      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as sessions_resolved,
       AVG(risk_level)::float as risk_avg
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
@@ -660,8 +676,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       AVG(risk_level)::float as risk_avg,
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as escalated,
-      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed,
-      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as resolved
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
     GROUP BY 1
@@ -713,7 +728,6 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: totals.sessions_open ?? 0,
       escalated: totals.sessions_escalated ?? 0,
       closed: totals.sessions_closed ?? 0,
-      resolved: totals.sessions_resolved ?? 0,
       riskAvg: totals.risk_avg ?? null,
     },
     byCategory: (byCategory || []).map((r: any) => ({
@@ -723,7 +737,6 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: r.open,
       escalated: r.escalated,
       closed: r.closed,
-      resolved: r.resolved,
     })),
     byDay: (byDay || []).map((r: any) => ({
       dayKey: r.day_key,
@@ -855,7 +868,16 @@ export async function getUserProfile(orgId: string, userId: string) {
        ON CONFLICT (user_id) DO NOTHING`,
       [userId, orgId, null, null, null, JSON.stringify([]), now, now],
     );
-    return { userId, orgId, fullName: null, email: null, phone: null, tagsJson: "[]", createdAt: now, updatedAt: now };
+    return {
+      userId,
+      orgId,
+      fullName: null,
+      email: null,
+      phone: null,
+      tagsJson: "[]",
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   const tagsArr = Array.isArray(row.tags_json) ? row.tags_json : [];
@@ -1013,7 +1035,7 @@ export async function createOutletSession(params: {
 }
 
 export async function getOutletSession(params: { orgId: string; sessionId: string }) {
-  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [params.orgId, params.sessionId]);
+  const rows = await q<any>("SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]);
   const r = rows[0];
   if (!r) return null;
 
@@ -1151,11 +1173,14 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     createdAt: nowIso(),
   };
 
-  await q(
-    `INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
-  );
+  await q(`INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [
+    msg.id,
+    msg.orgId,
+    msg.sessionId,
+    msg.sender,
+    msg.content,
+    msg.createdAt,
+  ]);
 
   await q(
     `UPDATE outlet_sessions
@@ -1227,7 +1252,7 @@ export async function resolveOutletSession(params: {
     WITH upd AS (
       UPDATE outlet_sessions
       SET
-        status = 'resolved',
+        status = 'closed',
         resolution_note = $1,
         resolved_by_user_id = $2,
         resolved_at = $3,
@@ -1280,19 +1305,7 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
   for (const r of rows) {
     const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
     const tags = normalizeTags(tagsArr);
-    const line = [
-      r.id,
-      r.username,
-      r.user_id,
-      r.ts,
-      r.day_key,
-      r.mood,
-      r.energy,
-      r.stress,
-      r.note ?? "",
-      JSON.stringify(tags),
-      r.created_at,
-    ]
+    const line = [r.id, r.username, r.user_id, r.ts, r.day_key, r.mood, r.energy, r.stress, r.note ?? "", JSON.stringify(tags), r.created_at]
       .map(csvEscape)
       .join(",");
     lines.push(line);
