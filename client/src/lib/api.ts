@@ -82,8 +82,8 @@ export type Summary = {
 /** Outlet / Counselor’s Office */
 export type OutletVisibility = "private" | "manager" | "admin";
 /**
- * Backend currently uses: open | escalated | closed
- * UI also supports: resolved (forward-compatible)
+ * Backend uses: open | escalated | closed | resolved
+ * (resolved is supported by your UI + storage.ts replacement)
  */
 export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 
@@ -99,7 +99,7 @@ export type OutletSession = {
   createdAt: string;
   updatedAt: string;
 
-  // optional backend fields (present in your Postgres storage)
+  // optional backend fields
   lastMessageAt?: string | null;
   lastSender?: "user" | "ai" | "staff" | null;
   messageCount?: number;
@@ -113,7 +113,7 @@ export type OutletMessage = {
   id: string;
   orgId: string;
   sessionId: string;
-  sender: "user" | "ai"; // MVP: staff read-only
+  sender: "user" | "ai" | "staff"; // forward-safe
   content: string;
   createdAt: string;
 };
@@ -158,6 +158,16 @@ function apiUrl(path: string) {
 function bestErrorMessage(data: any): string {
   const msg = data?.error?.message ?? data?.error ?? data?.message ?? data?.detail ?? data?.statusText ?? null;
   if (typeof msg === "string" && msg.trim()) return msg.trim();
+
+  // zod-like
+  const fieldErrors = data?.error?.fieldErrors;
+  if (fieldErrors && typeof fieldErrors === "object") {
+    const k = Object.keys(fieldErrors)[0];
+    const v = k ? fieldErrors[k] : null;
+    const first = Array.isArray(v) ? v[0] : null;
+    if (k && typeof first === "string" && first.trim()) return `${k}: ${first.trim()}`;
+  }
+
   return "Request failed";
 }
 
@@ -168,7 +178,7 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
     method,
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
