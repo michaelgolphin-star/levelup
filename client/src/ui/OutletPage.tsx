@@ -1,10 +1,12 @@
+// client/src/ui/OutletPage.tsx (FULL REPLACEMENT)
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
 import { api, apiGet } from "../lib/api";
 
 type OutletVisibility = "private" | "manager" | "admin";
-type OutletStatus = "open" | "escalated" | "closed";
+type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 
 function riskBadge(riskLevel: number) {
   if (riskLevel >= 2) return { cls: "badge bad", label: "High risk" };
@@ -19,6 +21,7 @@ function visLabel(v: OutletVisibility) {
 }
 
 function statusLabel(s: OutletStatus) {
+  if (s === "resolved") return "Resolved";
   if (s === "closed") return "Closed";
   if (s === "escalated") return "Escalated";
   return "Open";
@@ -104,7 +107,7 @@ export function OutletHomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
-  // Option A polish: focus the Category field when this page opens
+  // polish: focus the Category field when this page opens
   useEffect(() => {
     const t = setTimeout(() => categoryRef.current?.focus(), 50);
     return () => clearTimeout(t);
@@ -233,6 +236,7 @@ export function OutletHomePage() {
                 {sessions.map((s) => {
                   const rb = riskBadge(Number(s.riskLevel || 0));
                   const last = formatTs(s.lastMessageAt || s.updatedAt || s.createdAt);
+                  const st: OutletStatus = (s.status as OutletStatus) || "open";
                   return (
                     <div
                       key={s.id}
@@ -248,8 +252,7 @@ export function OutletHomePage() {
                         <div>
                           <div className="listTitle">{s.category ? s.category : "General"}</div>
                           <div className="small">
-                            {statusLabel(s.status)} • {visLabel(s.visibility)} • Created{" "}
-                            {formatTs(s.createdAt)}
+                            {statusLabel(st)} • {visLabel(s.visibility)} • Created {formatTs(s.createdAt)}
                             {last ? (
                               <>
                                 {" "}
@@ -261,7 +264,8 @@ export function OutletHomePage() {
 
                         <div className="chips">
                           <span className={rb.cls}>{rb.label}</span>
-                          {s.status === "closed" ? <span className="badge">Closed</span> : null}
+                          {st === "resolved" ? <span className="badge good">Resolved</span> : null}
+                          {st === "closed" ? <span className="badge">Closed</span> : null}
                         </div>
                       </div>
                     </div>
@@ -303,6 +307,10 @@ export function OutletSessionPage() {
 
   const [confirmClose, setConfirmClose] = useState(false);
   const [escalating, setEscalating] = useState(false);
+
+  // Staff resolve UI (manager/admin)
+  const [resolutionNote, setResolutionNote] = useState("");
+  const [resolving, setResolving] = useState(false);
 
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -387,6 +395,21 @@ export function OutletSessionPage() {
     }
   }
 
+  async function resolveSession() {
+    if (!id || !isStaff) return;
+    setToast(null);
+    setResolving(true);
+    try {
+      await api.outletResolve(id, { resolutionNote: resolutionNote.trim() ? resolutionNote.trim() : null });
+      setToast({ type: "good", text: "Marked resolved." });
+      await load();
+    } catch (e: any) {
+      setToast({ type: "bad", text: e.message || "Resolve failed." });
+    } finally {
+      setResolving(false);
+    }
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -399,9 +422,9 @@ export function OutletSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Option A polish: focus the message box for the owner, and scroll chat to bottom
+  // polish: focus the message box for the owner, and scroll chat to bottom
   useEffect(() => {
-    if (!loading && isOwner && session?.status !== "closed") {
+    if (!loading && isOwner && session?.status !== "closed" && session?.status !== "resolved") {
       const t = setTimeout(() => messageRef.current?.focus(), 50);
       return () => clearTimeout(t);
     }
@@ -414,8 +437,10 @@ export function OutletSessionPage() {
   }, [loading, messages.length]);
 
   const rb = riskBadge(Number(session?.riskLevel || 0));
-  const isClosed = session?.status === "closed";
-  const isEscalated = session?.status === "escalated";
+  const st: OutletStatus = (session?.status as OutletStatus) || "open";
+  const isClosed = st === "closed";
+  const isResolved = st === "resolved";
+  const isEscalated = st === "escalated";
 
   return (
     <div className="container">
@@ -426,8 +451,7 @@ export function OutletSessionPage() {
             <div className="sub">
               {session ? (
                 <>
-                  {session.category ? session.category : "General"} • {statusLabel(session.status)} •{" "}
-                  {visLabel(session.visibility)}
+                  {session.category ? session.category : "General"} • {statusLabel(st)} • {visLabel(session.visibility)}
                 </>
               ) : (
                 "Session"
@@ -490,27 +514,31 @@ export function OutletSessionPage() {
                         placeholder="Type what’s on your mind…"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        disabled={!isOwner || sending || isClosed}
+                        disabled={!isOwner || sending || isClosed || isResolved}
                         onKeyDown={(e) => {
                           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") send();
                         }}
                       />
-                      {isOwner && !isClosed ? (
+                      {isOwner && !isClosed && !isResolved ? (
                         <div className="small" style={{ marginTop: 6 }}>
                           Tip: Ctrl/⌘ + Enter to send
                         </div>
                       ) : null}
                     </div>
                     <div className="col" style={{ flexBasis: 160 }}>
-                      <button className="btn primary" onClick={send} disabled={!isOwner || sending || !input.trim() || isClosed}>
+                      <button
+                        className="btn primary"
+                        onClick={send}
+                        disabled={!isOwner || sending || !input.trim() || isClosed || isResolved}
+                      >
                         {sending ? "Sending…" : "Send"}
                       </button>
                     </div>
                   </div>
 
-                  {isClosed ? (
+                  {isClosed || isResolved ? (
                     <div className="small" style={{ marginTop: 10 }}>
-                      This session is closed. You can start a new session anytime.
+                      This session is {isResolved ? "resolved" : "closed"}. You can start a new session anytime.
                     </div>
                   ) : null}
                 </div>
@@ -527,13 +555,51 @@ export function OutletSessionPage() {
                     <div className="listTop">
                       <div>
                         <div className="listTitle">Status</div>
-                        <div className="small">{statusLabel(session.status)}</div>
+                        <div className="small">{statusLabel(st)}</div>
                       </div>
                       <div className="chips">
                         <span className="badge">{visLabel(session.visibility)}</span>
                       </div>
                     </div>
                   </div>
+
+                  {/* Staff-only resolve */}
+                  {isStaff ? (
+                    <div className="listItemStatic">
+                      <div className="listTitle">Resolve (staff)</div>
+                      <div className="small" style={{ marginTop: 6 }}>
+                        Mark as handled and add a short resolution note (optional).
+                      </div>
+
+                      <div style={{ marginTop: 10 }}>
+                        <div className="label">Resolution note (optional)</div>
+                        <textarea
+                          className="textarea"
+                          rows={3}
+                          value={resolutionNote}
+                          onChange={(e) => setResolutionNote(e.target.value)}
+                          placeholder="What was done / next steps / outcome…"
+                          disabled={resolving || isClosed || isResolved}
+                        />
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                        <button
+                          className="btn primary"
+                          onClick={resolveSession}
+                          disabled={resolving || isClosed || isResolved}
+                        >
+                          {isResolved ? "Resolved" : resolving ? "Resolving…" : "Mark resolved"}
+                        </button>
+                      </div>
+
+                      {isResolved ? (
+                        <div className="small" style={{ marginTop: 10 }}>
+                          This session is already resolved.
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div className="listItemStatic">
                     <div className="listTitle">Escalate</div>
@@ -548,7 +614,7 @@ export function OutletSessionPage() {
                           className="select"
                           value={escalateTo}
                           onChange={(e) => setEscalateTo(e.target.value as any)}
-                          disabled={!canEscalate || isClosed || isEscalated || escalating}
+                          disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
                         >
                           <option value="manager">manager</option>
                           <option value="admin">admin</option>
@@ -562,7 +628,7 @@ export function OutletSessionPage() {
                           value={assignToUserId}
                           onChange={(e) => setAssignToUserId(e.target.value)}
                           placeholder="(optional) paste a staff userId"
-                          disabled={!canEscalate || isClosed || isEscalated || escalating}
+                          disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
                         />
                       </div>
                     </div>
@@ -575,7 +641,7 @@ export function OutletSessionPage() {
                         value={reason}
                         onChange={(e) => setReason(e.target.value)}
                         placeholder="Short reason for escalation…"
-                        disabled={!canEscalate || isClosed || isEscalated || escalating}
+                        disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
                       />
                     </div>
 
@@ -583,17 +649,13 @@ export function OutletSessionPage() {
                       <button
                         className="btn primary"
                         onClick={escalate}
-                        disabled={!canEscalate || isClosed || isEscalated || escalating}
+                        disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
                       >
                         {isEscalated ? "Escalated" : escalating ? "Escalating…" : "Escalate"}
                       </button>
 
                       {!confirmClose ? (
-                        <button
-                          className="btn danger"
-                          onClick={() => setConfirmClose(true)}
-                          disabled={!canClose || isClosed}
-                        >
+                        <button className="btn danger" onClick={() => setConfirmClose(true)} disabled={!canClose || isClosed}>
                           Close session
                         </button>
                       ) : (
@@ -629,6 +691,8 @@ export function OutletSessionPage() {
                       • Staff can view only when visibility permits.
                       <br />
                       • Sending is owner-only (safe default).
+                      <br />
+                      • Resolve is staff-only (adds a note + marks handled).
                       <br />
                       • Closing locks the session.
                     </div>
