@@ -83,9 +83,10 @@ export type Summary = {
 export type OutletVisibility = "private" | "manager" | "admin";
 /**
  * Backend currently uses: open | escalated | closed
- * We include "resolved" as a forward-compatible option so TS doesn't break if status expands.
+ * UI also supports: resolved (forward-compatible)
  */
 export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
+
 export type OutletSession = {
   id: string;
   orgId: string;
@@ -94,21 +95,25 @@ export type OutletSession = {
   category: string | null;
   status: OutletStatus;
   riskLevel: number;
+
   createdAt: string;
   updatedAt: string;
 
-  // optional fields (safe if backend adds them)
-  escalatedToRole?: "manager" | "admin" | null;
-  assignedToUserId?: string | null;
+  // optional backend fields (present in your Postgres storage)
+  lastMessageAt?: string | null;
+  lastSender?: "user" | "ai" | "staff" | null;
+  messageCount?: number;
+
   resolutionNote?: string | null;
   resolvedByUserId?: string | null;
   resolvedAt?: string | null;
 };
+
 export type OutletMessage = {
   id: string;
   orgId: string;
   sessionId: string;
-  sender: "user" | "ai";
+  sender: "user" | "ai"; // MVP: staff read-only
   content: string;
   createdAt: string;
 };
@@ -136,7 +141,6 @@ export function setToken(t: string | null) {
     return;
   }
   localStorage.setItem(TOKEN_KEY, t);
-  // keep storage clean if user had old builds
   for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
 }
 
@@ -170,7 +174,6 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  // handle 204 / non-json gracefully
   const text = await res.text().catch(() => "");
   const data = text
     ? (() => {
@@ -182,10 +185,7 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
       })()
     : {};
 
-  if (!res.ok) {
-    throw new Error(bestErrorMessage(data));
-  }
-
+  if (!res.ok) throw new Error(bestErrorMessage(data));
   return data as T;
 }
 
@@ -243,7 +243,10 @@ export const api = {
     return req<{ habit: Habit }>("POST", "/api/habits", payload);
   },
   async listHabits(includeArchived = false) {
-    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${includeURIComponent(includeArchived ? "1" : "0")}`);
+    return req<{ habits: Habit[] }>(
+      "GET",
+      `/api/habits?includeArchived=${encodeURIComponent(includeArchived ? "1" : "0")}`,
+    );
   },
   async archiveHabit(id: string) {
     return req<{ ok: boolean }>("POST", `/api/habits/${encodeURIComponent(id)}/archive`);
@@ -339,18 +342,13 @@ export const api = {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
   },
 
-  /** NEW: Staff resolve (manager/admin) */
+  /** Staff resolve (manager/admin) */
   async outletResolve(sessionId: string, payload?: { resolutionNote?: string | null }) {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/resolve`, payload || {});
   },
 
-  /** Optional: Outlet analytics (manager/admin). Safe to call only if backend exists. */
+  /** Optional: Outlet analytics (manager/admin) */
   async outletAnalyticsSummary(days = 30) {
     return req<{ summary: any }>("GET", `/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
 };
-
-// small helper to avoid repeating encodeURIComponent for one boolean string
-function includeURIComponent(v: string) {
-  return encodeURIComponent(v);
-}
