@@ -1,3 +1,4 @@
+// server/routes.ts (FULL REPLACEMENT)
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
@@ -49,9 +50,7 @@ import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
  * Async route wrapper: prevents unhandled promise rejections
  * and ensures Express receives errors via next(err).
  */
-function wrap(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<any> | any,
-) {
+function wrap(fn: (req: Request, res: Response, next: NextFunction) => Promise<any> | any) {
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
@@ -136,8 +135,7 @@ async function generateOutletAiReply(params: {
     "end",
     "stop",
   ];
-  const looksLikeClosure =
-    donePhrases.some((p) => lowered === p || lowered.includes(p)) || msg.length <= 2;
+  const looksLikeClosure = donePhrases.some((p) => lowered === p || lowered.includes(p)) || msg.length <= 2;
 
   if (looksLikeClosure) {
     return {
@@ -201,8 +199,7 @@ async function generateOutletAiReply(params: {
   // -----------------------------
   // Default: one focused follow-up
   // -----------------------------
-  const looksLikeVague =
-    msg.length < 40 && !hasTimeWords && !hasPayWords && !hasConflictWords && !hasSafetyWords;
+  const looksLikeVague = msg.length < 40 && !hasTimeWords && !hasPayWords && !hasConflictWords && !hasSafetyWords;
 
   if (looksLikeVague) {
     return {
@@ -269,6 +266,24 @@ const OutletEscalateSchema = z.object({
 const OutletResolveSchema = z.object({
   resolutionNote: z.string().max(2000).optional().nullable(),
 });
+
+async function staffCanAccessOutletSession(auth: any, sessionId: string): Promise<boolean> {
+  const role = auth?.role;
+  if (role !== "admin" && role !== "manager") return false;
+
+  // IMPORTANT: your storage logic allows staff access via:
+  // - visibility (manager/admin)
+  // - OR an escalation record assigned to them (or unassigned)
+  // So we check against the same storage function to avoid RBAC mismatches.
+  const sessions = await listOutletSessionsForStaff({
+    orgId: auth.orgId,
+    role,
+    staffUserId: auth.userId,
+    limit: 300,
+  });
+
+  return sessions.some((s: any) => s.id === sessionId);
+}
 
 export function registerRoutes(app: Express) {
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
@@ -621,8 +636,6 @@ export function registerRoutes(app: Express) {
   // -----------------------------
   // Outlet / Grievance Office ✅
   // -----------------------------
-
-  // Employee: create a new outlet session
   app.post(
     "/api/outlet/sessions",
     requireAuth,
@@ -643,7 +656,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Employee: list my outlet sessions (staff can request staff view via ?view=staff)
   app.get(
     "/api/outlet/sessions",
     requireAuth,
@@ -672,7 +684,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Get a session + messages (RBAC enforced)
   app.get(
     "/api/outlet/sessions/:id",
     requireAuth,
@@ -684,14 +695,9 @@ export function registerRoutes(app: Express) {
       if (!session) return res.status(404).json({ error: "Session not found" });
 
       const isOwner = session.userId === auth.userId;
-      const isStaff = auth.role === "admin" || auth.role === "manager";
-
       if (!isOwner) {
-        if (!isStaff) return res.status(403).json({ error: "Forbidden" });
-
-        const vis = String(session.visibility || "private");
-        const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
-        if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
+        const allowed = await staffCanAccessOutletSession(auth, sessionId);
+        if (!allowed) return res.status(403).json({ error: "Forbidden" });
       }
 
       const messages = await listOutletMessages({ orgId: auth.orgId, sessionId });
@@ -699,7 +705,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Post a user message -> store -> generate AI reply -> store (owner only)
   app.post(
     "/api/outlet/sessions/:id/messages",
     requireAuth,
@@ -734,7 +739,6 @@ export function registerRoutes(app: Express) {
         content: ai.reply,
       });
 
-      // If risk triggers, escalate to admin (MVP behavior)
       if (ai.riskLevel >= 2) {
         await escalateOutletSession({
           orgId: auth.orgId,
@@ -749,7 +753,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Staff or owner: escalate a session (manager/admin)
   app.post(
     "/api/outlet/sessions/:id/escalate",
     requireAuth,
@@ -778,7 +781,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Close a session (owner or staff)
   app.post(
     "/api/outlet/sessions/:id/close",
     requireAuth,
@@ -790,15 +792,14 @@ export function registerRoutes(app: Express) {
       if (!session) return res.status(404).json({ error: "Session not found" });
 
       const isOwner = session.userId === auth.userId;
-      const isStaff = auth.role === "admin" || auth.role === "manager";
-      if (!isOwner && !isStaff) return res.status(403).json({ error: "Forbidden" });
+      const isStaffAllowed = await staffCanAccessOutletSession(auth, sessionId);
+      if (!isOwner && !isStaffAllowed) return res.status(403).json({ error: "Forbidden" });
 
       const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
       return res.json({ ok: !!ok });
     }),
   );
 
-  // Staff: resolve w/ a short note (manager/admin)
   app.post(
     "/api/outlet/sessions/:id/resolve",
     requireAuth,
@@ -812,10 +813,8 @@ export function registerRoutes(app: Express) {
       const session = await getOutletSession({ orgId: auth.orgId, sessionId });
       if (!session) return res.status(404).json({ error: "Session not found" });
 
-      // Staff can only resolve sessions they are allowed to view
-      const vis = String(session.visibility || "private");
-      const staffAllowed = vis === "manager" || (vis === "admin" && auth.role === "admin");
-      if (!staffAllowed) return res.status(403).json({ error: "Forbidden" });
+      const allowed = await staffCanAccessOutletSession(auth, sessionId);
+      if (!allowed) return res.status(403).json({ error: "Forbidden" });
 
       const ok = await resolveOutletSession({
         orgId: auth.orgId,
@@ -828,7 +827,6 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Staff analytics for Counselor’s Office (manager/admin)
   app.get(
     "/api/outlet/analytics/summary",
     requireAuth,
