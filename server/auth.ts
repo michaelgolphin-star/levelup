@@ -1,8 +1,14 @@
 // server/auth.ts (FULL REPLACEMENT)
-import { sign, verify, type Secret, type JwtPayload } from "jsonwebtoken";
+import pkg from "jsonwebtoken";
+import type { Secret, JwtPayload } from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import type { Request, Response, NextFunction } from "express";
 import type { Role } from "./types.js";
+
+const { sign, verify } = pkg as unknown as {
+  sign: (payload: any, secret: Secret, options?: any) => string;
+  verify: (token: string, secret: Secret) => JwtPayload | string;
+};
 
 type AuthPayload = {
   userId: string;
@@ -13,7 +19,6 @@ type AuthPayload = {
 function getJwtSecret(): Secret {
   const s = process.env.JWT_SECRET;
   if (!s || typeof s !== "string" || s.trim().length < 16) {
-    // 16+ chars: basic sanity check to avoid "secret='test'" accidents
     throw new Error("JWT_SECRET is not set (or too short). Set a strong JWT_SECRET in env.");
   }
   return s;
@@ -36,15 +41,15 @@ export function signToken(payload: AuthPayload) {
 
 export function verifyToken(token: string): AuthPayload {
   const secret = getJwtSecret();
-  const decoded = verify(token, secret) as JwtPayload | string;
+  const decoded = verify(token, secret);
 
   if (!decoded || typeof decoded !== "object") {
     throw new Error("Invalid token payload");
   }
 
-  const userId = decoded.userId;
-  const orgId = decoded.orgId;
-  const role = decoded.role;
+  const userId = (decoded as any).userId;
+  const orgId = (decoded as any).orgId;
+  const role = (decoded as any).role;
 
   if (typeof userId !== "string" || typeof orgId !== "string" || typeof role !== "string") {
     throw new Error("Invalid token payload shape");
