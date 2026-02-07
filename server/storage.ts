@@ -398,7 +398,7 @@ export async function createCheckIn(params: {
   tags?: string[];
 }) {
   const ts = params.ts || nowIso();
-  const tags = normalizeTags(params.tags);
+  const tags = normalizeTags(params.tags ?? []);
 
   const checkin = {
     id: nanoid(),
