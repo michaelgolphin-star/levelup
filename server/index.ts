@@ -15,18 +15,67 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT || 8080);
 
+// Allow Railway app + local dev. Add custom domains here later.
+const ALLOWED_ORIGINS = new Set(
+  [
+    "https://levelup-production-ced0.up.railway.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+  ]
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+function corsOriginCheck(origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) {
+  // Allow server-to-server / curl / same-origin (no Origin header)
+  if (!origin) return cb(null, true);
+
+  // Exact match allowlist
+  if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
+
+  // Allow any Railway subdomain of your project (covers preview URLs if you enable them)
+  try {
+    const u = new URL(origin);
+    if (u.protocol === "https:" && u.hostname.endsWith(".up.railway.app")) return cb(null, true);
+  } catch {
+    // ignore
+  }
+
+  return cb(new Error("CORS blocked: origin not allowed"));
+}
+
 async function main() {
   const app = express();
 
-  // Railway runs behind a reverse proxy (fixes express-rate-limit X-Forwarded-For warning)
+  // Railway runs behind a reverse proxy
   app.set("trust proxy", 1);
 
-  app.use(cors({ origin: true, credentials: true }));
-  app.use(helmet());
+  // Small hardening: hide Express fingerprint
+  app.disable("x-powered-by");
+
+  // CORS (locked down)
+  app.use(
+    cors({
+      origin: corsOriginCheck,
+      credentials: true,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization"],
+    }),
+  );
+
+  // Basic security headers
+  app.use(
+    helmet({
+      // keep this simple for now; add CSP later once you know exactly what you load
+      crossOriginResourcePolicy: { policy: "same-site" },
+    }),
+  );
+
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: true }));
   app.use(morgan("dev"));
 
+  // Global rate limit
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000,
@@ -36,18 +85,29 @@ async function main() {
     }),
   );
 
+  // Stricter rate limit for auth endpoints (brute-force protection)
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many auth attempts. Try again later." },
+  });
+  app.use("/api/auth/login", authLimiter);
+  app.use("/api/auth/register", authLimiter);
+  app.use("/api/auth/request-reset", authLimiter);
+  app.use("/api/auth/reset", authLimiter);
+
   // DB must be ready before routes
   await ensureDb();
 
-  // API routes + JSON error handler (routes.ts adds its own error handler at the end)
+  // API routes (routes.ts includes its own JSON error handler at the end)
   registerRoutes(app);
 
   // --- Serve built frontend (Vite output) ---
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
 
-  // When compiled, we run from: server/dist/index.js
-  // Frontend build is typically: <root>/dist
   const distCandidates = [
     path.resolve(__dirname, "../../dist"),
     path.resolve(process.cwd(), "dist"),
@@ -69,6 +129,7 @@ async function main() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Server listening on port ${PORT}`);
+    console.log(`✅ Allowed origins: ${Array.from(ALLOWED_ORIGINS).join(", ")}`);
   });
 }
 
