@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently -n server,client -c auto \"tsx watch server/index.ts\" \"vite\"",
     "build": "vite build && tsx server/build.ts",
-    "start": "node server/dist/index.js",
+    "start": "node server/dist/server/index.js",
     "seed": "tsx server/seed.ts"
   },
   "dependencies": {
