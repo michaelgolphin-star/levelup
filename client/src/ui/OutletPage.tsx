@@ -483,15 +483,19 @@ export function OutletSessionPage() {
 
                 <div className="chatBox" style={{ marginTop: 12 }}>
                   <div className="chatList">
-                    {messages.map((m) => (
-                      <div key={m.id} className={`bubble ${m.sender === "user" ? "user" : "ai"}`}>
-                        <div className="bubbleMeta">
-                          <span>{m.sender === "user" ? "You" : "Counselor"}</span>
-                          <span>{m.createdAt ? new Date(m.createdAt).toLocaleString() : ""}</span>
+                    {messages.map((m) => {
+                      const who = m.sender === "user" ? "You" : m.sender === "staff" ? "Staff" : "Counselor";
+                      const bubbleCls = m.sender === "user" ? "user" : "ai"; // keep styling simple for MVP
+                      return (
+                        <div key={m.id} className={`bubble ${bubbleCls}`}>
+                          <div className="bubbleMeta">
+                            <span>{who}</span>
+                            <span>{m.createdAt ? new Date(m.createdAt).toLocaleString() : ""}</span>
+                          </div>
+                          <div className="bubbleText">{m.content}</div>
                         </div>
-                        <div className="bubbleText">{m.content}</div>
-                      </div>
-                    ))}
+                      );
+                    })}
                     {!messages.length ? <div className="small">No messages yet.</div> : null}
                     <div ref={chatEndRef} />
                   </div>
@@ -655,15 +659,23 @@ export function OutletSessionPage() {
                       </button>
 
                       {!confirmClose ? (
-                        <button className="btn danger" onClick={() => setConfirmClose(true)} disabled={!canClose || isClosed}>
+                        <button
+                          className="btn danger"
+                          onClick={() => setConfirmClose(true)}
+                          disabled={!canClose || isClosed || isResolved}
+                        >
                           Close session
                         </button>
                       ) : (
                         <>
-                          <button className="btn danger" onClick={closeSession} disabled={!canClose || isClosed}>
+                          <button
+                            className="btn danger"
+                            onClick={closeSession}
+                            disabled={!canClose || isClosed || isResolved}
+                          >
                             Confirm close
                           </button>
-                          <button className="btn" onClick={() => setConfirmClose(false)} disabled={isClosed}>
+                          <button className="btn" onClick={() => setConfirmClose(false)} disabled={isClosed || isResolved}>
                             Cancel
                           </button>
                         </>
