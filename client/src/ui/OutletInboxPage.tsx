@@ -1,10 +1,12 @@
+// client/src/ui/OutletInboxPage.tsx (FULL REPLACEMENT)
+
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { AuthPayload, Role } from "../lib/api";
 import { apiGet } from "../lib/api";
 
 type OutletVisibility = "private" | "manager" | "admin";
-type OutletStatus = "open" | "escalated" | "closed";
+type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 
 function riskBadge(riskLevel: number) {
   if (riskLevel >= 2) return { cls: "badge bad", label: "High risk" };
@@ -19,6 +21,7 @@ function visLabel(v: OutletVisibility) {
 }
 
 function statusLabel(s: OutletStatus) {
+  if (s === "resolved") return "Resolved";
   if (s === "closed") return "Closed";
   if (s === "escalated") return "Escalated";
   return "Open";
@@ -52,7 +55,7 @@ export function OutletInboxPage() {
     setMsg(null);
     setLoading(true);
     try {
-      // Uses your existing backend: GET /api/outlet/sessions?view=staff
+      // Uses backend: GET /api/outlet/sessions?view=staff
       const r = await apiGet<{ sessions: any[] }>("/api/outlet/sessions?view=staff&limit=200");
       setSessions(r.sessions || []);
     } catch (e: any) {
@@ -192,6 +195,7 @@ export function OutletInboxPage() {
             {triage.map((s) => {
               const rb = riskBadge(Number(s.riskLevel || 0));
               const last = s.lastMessageAt || s.updatedAt || s.createdAt;
+              const st: OutletStatus = (s.status as OutletStatus) || "open";
 
               return (
                 <div
@@ -205,7 +209,7 @@ export function OutletInboxPage() {
                     <div>
                       <div className="listTitle">{s.category ? s.category : "General"}</div>
                       <div className="small">
-                        {statusLabel(s.status)} • {visLabel(s.visibility)} • Last:{" "}
+                        {statusLabel(st)} • {visLabel(s.visibility)} • Last:{" "}
                         {last ? new Date(last).toLocaleString() : "—"}
                       </div>
                     </div>
@@ -213,6 +217,7 @@ export function OutletInboxPage() {
                     <div className="chips">
                       <span className={rb.cls}>{rb.label}</span>
                       {String(s.status) === "escalated" ? <span className="badge warn">Escalated</span> : null}
+                      {String(s.status) === "resolved" ? <span className="badge good">Resolved</span> : null}
                     </div>
                   </div>
                 </div>
