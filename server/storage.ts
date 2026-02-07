@@ -1,4 +1,4 @@
-// server/storage.ts (FULL REPLACEMENT)
+// server/storage.ts (FULL REPLACEMENT — hardened minimal changes)
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -69,6 +69,26 @@ function normalizeTags(tags: any): string[] {
     .map((t) => String(t ?? "").trim())
     .filter(Boolean)
     .slice(0, 20);
+}
+
+/**
+ * Hardened JSONB array reader:
+ * - pg often returns JSONB as JS arrays/objects
+ * - but some environments/type-parsers can return strings
+ */
+function readJsonbArray(value: any): string[] {
+  if (Array.isArray(value)) return normalizeTags(value);
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return normalizeTags(parsed);
+    } catch {
+      // fall through
+    }
+  }
+
+  return [];
 }
 
 /** Outlet / grievance sessions */
@@ -244,15 +264,13 @@ export async function ensureDb() {
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT`,
   ]);
 
-  // Defaults for existing rows where columns were just added
-  await execMany([
-    `UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`,
-    `UPDATE outlet_sessions SET status = COALESCE(status, 'open')`,
-    `UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`,
-    `UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0)`,
-    `UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, '${now}')`,
-    `UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, '${now}')`,
-  ]);
+  // Defaults for existing rows where columns were just added (parameterized)
+  await q(`UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`);
+  await q(`UPDATE outlet_sessions SET status = COALESCE(status, 'open')`);
+  await q(`UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`);
+  await q(`UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0)`);
+  await q(`UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, $1)`, [now]);
+  await q(`UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, $1)`, [now]);
 
   // 3) Indexes (one statement each)
   await execMany([
@@ -393,10 +411,12 @@ export async function createCheckIn(params: {
     stress: params.stress,
     note: params.note ?? null,
     tags,
+    // keep API compatibility: still return tagsJson as a string
     tagsJson: JSON.stringify(tags),
     createdAt: nowIso(),
   };
 
+  // ✅ Harden: store JSONB as an actual array (not a string)
   await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
@@ -410,7 +430,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      checkin.tagsJson,
+      checkin.tags, // JSONB array
       checkin.createdAt,
     ],
   );
@@ -439,8 +459,7 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
   const rows = await q<any>(sql, args);
 
   return rows.map((r) => {
-    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
-    const tags = normalizeTags(tagsArr);
+    const tags = readJsonbArray(r.tags_json);
     return {
       id: r.id,
       orgId: r.org_id,
@@ -452,6 +471,7 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
       stress: r.stress,
       note: r.note,
       tags,
+      // keep API compatibility
       tagsJson: JSON.stringify(tags),
       createdAt: r.created_at,
     };
@@ -862,11 +882,12 @@ export async function getUserProfile(orgId: string, userId: string) {
 
   if (!row) {
     const now = nowIso();
+    // ✅ store JSONB as array
     await q(
       `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId, orgId, null, null, null, JSON.stringify([]), now, now],
+      [userId, orgId, null, null, null, [], now, now],
     );
     return {
       userId,
@@ -880,14 +901,14 @@ export async function getUserProfile(orgId: string, userId: string) {
     };
   }
 
-  const tagsArr = Array.isArray(row.tags_json) ? row.tags_json : [];
+  const tags = readJsonbArray(row.tags_json);
   return {
     userId: row.user_id,
     orgId: row.org_id,
     fullName: row.full_name,
     email: row.email,
     phone: row.phone,
-    tagsJson: JSON.stringify(normalizeTags(tagsArr)),
+    tagsJson: JSON.stringify(tags),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -917,11 +938,12 @@ export async function upsertUserProfile(params: {
   const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
+  // ✅ store JSONB as array
   await q(
     `UPDATE user_profiles
      SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
      WHERE org_id = $6 AND user_id = $7`,
-    [nextFullName, nextEmail, nextPhone, JSON.stringify(nextTags), now, params.orgId, params.userId],
+    [nextFullName, nextEmail, nextPhone, nextTags, now, params.orgId, params.userId],
   );
 
   return getUserProfile(params.orgId, params.userId);
@@ -1303,9 +1325,20 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
   const lines = [headers.join(",")];
 
   for (const r of rows) {
-    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
-    const tags = normalizeTags(tagsArr);
-    const line = [r.id, r.username, r.user_id, r.ts, r.day_key, r.mood, r.energy, r.stress, r.note ?? "", JSON.stringify(tags), r.created_at]
+    const tags = readJsonbArray(r.tags_json);
+    const line = [
+      r.id,
+      r.username,
+      r.user_id,
+      r.ts,
+      r.day_key,
+      r.mood,
+      r.energy,
+      r.stress,
+      r.note ?? "",
+      JSON.stringify(tags),
+      r.created_at,
+    ]
       .map(csvEscape)
       .join(",");
     lines.push(line);
@@ -1329,9 +1362,18 @@ export async function exportUsersCsv(params: { orgId: string }) {
   const lines = [headers.join(",")];
 
   for (const r of rows) {
-    const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
-    const tags = normalizeTags(tagsArr);
-    const line = [r.user_id, r.username, r.role, r.created_at, r.full_name ?? "", r.email ?? "", r.phone ?? "", JSON.stringify(tags), r.updated_at ?? ""]
+    const tags = readJsonbArray(r.tags_json);
+    const line = [
+      r.user_id,
+      r.username,
+      r.role,
+      r.created_at,
+      r.full_name ?? "",
+      r.email ?? "",
+      r.phone ?? "",
+      JSON.stringify(tags),
+      r.updated_at ?? "",
+    ]
       .map(csvEscape)
       .join(",");
     lines.push(line);
