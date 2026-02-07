@@ -1,3 +1,4 @@
+// server/index.ts (FULL REPLACEMENT)
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -14,54 +15,64 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT || 8080);
 
-const app = express();
+async function main() {
+  const app = express();
 
-// Railway runs behind a reverse proxy (fixes express-rate-limit X-Forwarded-For warning)
-app.set("trust proxy", 1);
+  // Railway runs behind a reverse proxy (fixes express-rate-limit X-Forwarded-For warning)
+  app.set("trust proxy", 1);
 
-app.use(cors({ origin: true, credentials: true }));
-app.use(helmet());
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
-app.use(morgan("dev"));
+  app.use(cors({ origin: true, credentials: true }));
+  app.use(helmet());
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true }));
+  app.use(morgan("dev"));
 
-app.use(
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 300,
-    standardHeaders: true,
-    legacyHeaders: false,
-  }),
-);
+  app.use(
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 300,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+  );
 
-await ensureDb();
-registerRoutes(app);
+  // DB must be ready before routes
+  await ensureDb();
 
-// --- Serve built frontend (Vite output) ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+  // API routes + JSON error handler (routes.ts adds its own error handler at the end)
+  registerRoutes(app);
 
-// When compiled, we run from: server/dist/index.js
-// Frontend build is typically: <root>/dist
-const distCandidates = [
-  path.resolve(__dirname, "../../dist"),
-  path.resolve(process.cwd(), "dist"),
-  path.resolve(process.cwd(), "client", "dist"),
-];
+  // --- Serve built frontend (Vite output) ---
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
 
-const distPath = distCandidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+  // When compiled, we run from: server/dist/index.js
+  // Frontend build is typically: <root>/dist
+  const distCandidates = [
+    path.resolve(__dirname, "../../dist"),
+    path.resolve(process.cwd(), "dist"),
+    path.resolve(process.cwd(), "client", "dist"),
+  ];
 
-if (distPath) {
-  app.use(express.static(distPath));
-  app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
-} else {
-  app.get("/", (_req, res) => {
-    res
-      .status(200)
-      .send("API is running. Frontend build not found. Looked in: " + distCandidates.join(", "));
+  const distPath = distCandidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+
+  if (distPath) {
+    app.use(express.static(distPath));
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
+  } else {
+    app.get("/", (_req, res) => {
+      res
+        .status(200)
+        .send("API is running. Frontend build not found. Looked in: " + distCandidates.join(", "));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`✅ Server listening on port ${PORT}`);
   });
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server listening on port ${PORT}`);
+main().catch((err) => {
+  console.error("❌ Fatal startup error:", err);
+  process.exit(1);
 });
