@@ -81,7 +81,11 @@ export type Summary = {
 
 /** Outlet / Counselor’s Office */
 export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed";
+/**
+ * Backend currently uses: open | escalated | closed
+ * We include "resolved" as a forward-compatible option so TS doesn't break if status expands.
+ */
+export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 export type OutletSession = {
   id: string;
   orgId: string;
@@ -92,6 +96,13 @@ export type OutletSession = {
   riskLevel: number;
   createdAt: string;
   updatedAt: string;
+
+  // optional fields (safe if backend adds them)
+  escalatedToRole?: "manager" | "admin" | null;
+  assignedToUserId?: string | null;
+  resolutionNote?: string | null;
+  resolvedByUserId?: string | null;
+  resolvedAt?: string | null;
 };
 export type OutletMessage = {
   id: string;
@@ -232,7 +243,7 @@ export const api = {
     return req<{ habit: Habit }>("POST", "/api/habits", payload);
   },
   async listHabits(includeArchived = false) {
-    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${includeArchived ? "1" : "0"}`);
+    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${includeURIComponent(includeArchived ? "1" : "0")}`);
   },
   async archiveHabit(id: string) {
     return req<{ ok: boolean }>("POST", `/api/habits/${encodeURIComponent(id)}/archive`);
@@ -328,8 +339,18 @@ export const api = {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
   },
 
+  /** NEW: Staff resolve (manager/admin) */
+  async outletResolve(sessionId: string, payload?: { resolutionNote?: string | null }) {
+    return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/resolve`, payload || {});
+  },
+
   /** Optional: Outlet analytics (manager/admin). Safe to call only if backend exists. */
   async outletAnalyticsSummary(days = 30) {
     return req<{ summary: any }>("GET", `/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
 };
+
+// small helper to avoid repeating encodeURIComponent for one boolean string
+function includeURIComponent(v: string) {
+  return encodeURIComponent(v);
+}
