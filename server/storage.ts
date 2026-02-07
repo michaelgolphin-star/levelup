@@ -1,3 +1,5 @@
+// server/storage.ts (FULL REPLACEMENT)
+
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -20,8 +22,7 @@ if (!DATABASE_URL) {
 // - if PGSSLMODE=require OR URL includes sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
-  DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -60,7 +61,7 @@ function normalizeTags(tags: any): string[] {
 
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed";
+export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 export type OutletSender = "user" | "ai" | "staff";
 
 function normalizeVisibility(v: any): OutletVisibility {
@@ -72,6 +73,7 @@ function normalizeVisibility(v: any): OutletVisibility {
 
 function normalizeStatus(v: any): OutletStatus {
   const s = String(v || "").toLowerCase();
+  if (s === "resolved") return "resolved";
   if (s === "escalated") return "escalated";
   if (s === "closed") return "closed";
   return "open";
@@ -87,10 +89,12 @@ function normalizeSender(v: any): OutletSender {
 /**
  * ensureDb()
  * - Creates tables if missing
- * - **Migrates existing tables safely** using ADD COLUMN IF NOT EXISTS
+ * - Migrates existing tables safely using ADD COLUMN IF NOT EXISTS
  * - Creates indexes only after columns are guaranteed to exist
  */
 export async function ensureDb() {
+  const bootNow = nowIso();
+
   // 1) Base tables
   await q(`
     CREATE TABLE IF NOT EXISTS orgs (
@@ -210,8 +214,7 @@ export async function ensureDb() {
     );
   `);
 
-  // 2) 🔧 Migration safety: add missing columns to existing tables
-  // This prevents crashes like: "column last_message_at does not exist"
+  // 2) Migration safety
   await q(`
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT;
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT;
@@ -227,17 +230,20 @@ export async function ensureDb() {
     ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT;
   `);
 
-  // Defaults for existing rows where columns were just added (safe no-ops if already set)
-  await q(`
+  // Defaults for any legacy rows
+  await q(
+    `
     UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private');
     UPDATE outlet_sessions SET status = COALESCE(status, 'open');
     UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0);
     UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0);
-    UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, '${nowIso()}');
-    UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, '${nowIso()}');
-  `);
+    UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, $1);
+    UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, $1);
+    `,
+    [bootNow],
+  );
 
-  // 3) Indexes (only after columns are guaranteed to exist)
+  // 3) Indexes
   await q(`
     CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key);
     CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key);
@@ -267,11 +273,7 @@ export async function ensureDb() {
 /** Orgs */
 export async function createOrg(name: string) {
   const org = { id: nanoid(), name: name.trim(), createdAt: nowIso() };
-  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [
-    org.id,
-    org.name,
-    org.createdAt,
-  ]);
+  await q("INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)", [org.id, org.name, org.createdAt]);
   return org;
 }
 
@@ -338,13 +340,7 @@ export async function listUsers(orgId: string) {
     "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
     [orgId],
   );
-  return rows.map((r) => ({
-    id: r.id,
-    username: r.username,
-    orgId: r.org_id,
-    role: r.role as Role,
-    createdAt: r.created_at,
-  }));
+  return rows.map((r) => ({ id: r.id, username: r.username, orgId: r.org_id, role: r.role as Role, createdAt: r.created_at }));
 }
 
 export async function setUserRole(orgId: string, userId: string, role: Role) {
@@ -520,12 +516,13 @@ export async function summaryForUser(params: { orgId: string; userId: string; da
 
   const set = new Set(byDay.map((r: any) => r.day_key));
   let streak = 0;
-  const today = new Date().toISOString().slice(0, 10);
   for (let i = 0; i < 365; i++) {
     const day = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     if (set.has(day)) streak += 1;
     else break;
   }
+
+  const today = new Date().toISOString().slice(0, 10);
 
   const overallRows = await q<any>(
     `SELECT AVG(mood)::float as mood_avg,
@@ -646,6 +643,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as sessions_open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as sessions_escalated,
       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as sessions_closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as sessions_resolved,
       AVG(risk_level)::float as risk_avg
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
@@ -662,7 +660,8 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       AVG(risk_level)::float as risk_avg,
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as escalated,
-      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as resolved
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
     GROUP BY 1
@@ -714,6 +713,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: totals.sessions_open ?? 0,
       escalated: totals.sessions_escalated ?? 0,
       closed: totals.sessions_closed ?? 0,
+      resolved: totals.sessions_resolved ?? 0,
       riskAvg: totals.risk_avg ?? null,
     },
     byCategory: (byCategory || []).map((r: any) => ({
@@ -723,6 +723,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: r.open,
       escalated: r.escalated,
       closed: r.closed,
+      resolved: r.resolved,
     })),
     byDay: (byDay || []).map((r: any) => ({
       dayKey: r.day_key,
@@ -756,10 +757,14 @@ export async function createInvite(params: { orgId: string; role: Role; expiresA
     createdBy: params.createdBy,
   };
 
-  await q(
-    "INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
-    [invite.token, invite.orgId, invite.role, invite.expiresAt, invite.createdAt, invite.createdBy],
-  );
+  await q("INSERT INTO invites (token, org_id, role, expires_at, created_at, created_by) VALUES ($1,$2,$3,$4,$5,$6)", [
+    invite.token,
+    invite.orgId,
+    invite.role,
+    invite.expiresAt,
+    invite.createdAt,
+    invite.createdBy,
+  ]);
 
   return invite;
 }
@@ -850,16 +855,7 @@ export async function getUserProfile(orgId: string, userId: string) {
        ON CONFLICT (user_id) DO NOTHING`,
       [userId, orgId, null, null, null, JSON.stringify([]), now, now],
     );
-    return {
-      userId,
-      orgId,
-      fullName: null,
-      email: null,
-      phone: null,
-      tagsJson: "[]",
-      createdAt: now,
-      updatedAt: now,
-    };
+    return { userId, orgId, fullName: null, email: null, phone: null, tagsJson: "[]", createdAt: now, updatedAt: now };
   }
 
   const tagsArr = Array.isArray(row.tags_json) ? row.tags_json : [];
@@ -921,10 +917,15 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q(
-    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
-  );
+  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
+    row.id,
+    row.orgId,
+    row.userId,
+    row.authorId,
+    row.ts,
+    row.note,
+    row.createdAt,
+  ]);
 
   return row;
 }
@@ -932,10 +933,11 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
 export async function listUserNotes(params: { orgId: string; userId: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 500));
 
-  const rows = await q<any>(
-    "SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3",
-    [params.orgId, params.userId, limit],
-  );
+  const rows = await q<any>("SELECT * FROM user_notes WHERE org_id = $1 AND user_id = $2 ORDER BY ts DESC LIMIT $3", [
+    params.orgId,
+    params.userId,
+    limit,
+  ]);
 
   const au = await q<any>("SELECT id, username FROM users WHERE org_id = $1", [params.orgId]);
   const authors = new Map<string, string>();
@@ -1011,10 +1013,7 @@ export async function createOutletSession(params: {
 }
 
 export async function getOutletSession(params: { orgId: string; sessionId: string }) {
-  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [
-    params.orgId,
-    params.sessionId,
-  ]);
+  const rows = await q<any>(`SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2`, [params.orgId, params.sessionId]);
   const r = rows[0];
   if (!r) return null;
 
@@ -1066,19 +1065,12 @@ export async function listOutletSessionsForUser(params: { orgId: string; userId:
   }));
 }
 
-export async function listOutletSessionsForStaff(params: {
-  orgId: string;
-  role: Role;
-  staffUserId?: string;
-  limit?: number;
-}) {
+export async function listOutletSessionsForStaff(params: { orgId: string; role: Role; staffUserId?: string; limit?: number }) {
   const limit = Math.max(1, Math.min(params.limit ?? 100, 300));
   if (params.role !== "manager" && params.role !== "admin") return [];
 
   const visibilityClause =
-    params.role === "admin"
-      ? `(s.visibility = 'admin' OR s.visibility = 'manager')`
-      : `(s.visibility = 'manager')`;
+    params.role === "admin" ? `(s.visibility = 'admin' OR s.visibility = 'manager')` : `(s.visibility = 'manager')`;
 
   const escRole = params.role;
   const escWhere: string[] = [`e.org_id = $1`, `e.escalated_to_role = $2`];
@@ -1165,7 +1157,6 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
   );
 
-  // Update inbox fields
   await q(
     `UPDATE outlet_sessions
      SET
@@ -1204,12 +1195,11 @@ export async function escalateOutletSession(params: {
     [esc.id, esc.orgId, esc.sessionId, esc.escalatedToRole, esc.assignedToUserId, esc.reason, esc.createdAt],
   );
 
-  await q(
-    `UPDATE outlet_sessions
-     SET status = 'escalated', updated_at = $1
-     WHERE org_id = $2 AND id = $3`,
-    [now, params.orgId, params.sessionId],
-  );
+  await q(`UPDATE outlet_sessions SET status = 'escalated', updated_at = $1 WHERE org_id = $2 AND id = $3`, [
+    now,
+    params.orgId,
+    params.sessionId,
+  ]);
 
   return esc;
 }
@@ -1237,7 +1227,7 @@ export async function resolveOutletSession(params: {
     WITH upd AS (
       UPDATE outlet_sessions
       SET
-        status = 'closed',
+        status = 'resolved',
         resolution_note = $1,
         resolved_by_user_id = $2,
         resolved_at = $3,
@@ -1328,17 +1318,7 @@ export async function exportUsersCsv(params: { orgId: string }) {
   for (const r of rows) {
     const tagsArr = Array.isArray(r.tags_json) ? r.tags_json : [];
     const tags = normalizeTags(tagsArr);
-    const line = [
-      r.user_id,
-      r.username,
-      r.role,
-      r.created_at,
-      r.full_name ?? "",
-      r.email ?? "",
-      r.phone ?? "",
-      JSON.stringify(tags),
-      r.updated_at ?? "",
-    ]
+    const line = [r.user_id, r.username, r.role, r.created_at, r.full_name ?? "", r.email ?? "", r.phone ?? "", JSON.stringify(tags), r.updated_at ?? ""]
       .map(csvEscape)
       .join(",");
     lines.push(line);
