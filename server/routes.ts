@@ -6,6 +6,7 @@ import {
   createUser,
   findUserByUsername,
   getOrg,
+  getUserById,
   listUsers,
   setUserRole,
   createCheckIn,
@@ -54,6 +55,23 @@ function wrap(fn: (req: Request, res: Response, next: NextFunction) => Promise<a
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
+}
+
+/**
+ * Minimal hardening helpers
+ */
+function isExpired(expiresAtIso: string) {
+  const t = new Date(expiresAtIso).getTime();
+  return !Number.isFinite(t) || t < Date.now();
+}
+
+async function assertUserInOrgOr404(orgId: string, userId: string, res: Response) {
+  const u = await getUserById(userId);
+  if (!u || u.orgId !== orgId) {
+    res.status(404).json({ error: "User not found" });
+    return null;
+  }
+  return u;
 }
 
 /**
@@ -222,15 +240,23 @@ async function generateOutletAiReply(params: {
   };
 }
 
+const UsernameSchema = z
+  .string()
+  .min(3)
+  .max(40)
+  .regex(/^[a-zA-Z0-9._-]+$/, "Username can only contain letters, numbers, dot, underscore, hyphen");
+
+const PasswordSchema = z.string().min(6).max(200);
+
 const RegisterSchema = z.object({
   orgName: z.string().min(2).max(80).optional(),
-  username: z.string().min(3).max(40),
-  password: z.string().min(6).max(200),
+  username: UsernameSchema,
+  password: PasswordSchema,
 });
 
 const LoginSchema = z.object({
-  username: z.string().min(3).max(40),
-  password: z.string().min(6).max(200),
+  username: UsernameSchema,
+  password: PasswordSchema,
 });
 
 const CheckInSchema = z.object({
@@ -271,10 +297,6 @@ async function staffCanAccessOutletSession(auth: any, sessionId: string): Promis
   const role = auth?.role;
   if (role !== "admin" && role !== "manager") return false;
 
-  // IMPORTANT: your storage logic allows staff access via:
-  // - visibility (manager/admin)
-  // - OR an escalation record assigned to them (or unassigned)
-  // So we check against the same storage function to avoid RBAC mismatches.
   const sessions = await listOutletSessionsForStaff({
     orgId: auth.orgId,
     role,
@@ -329,6 +351,8 @@ export function registerRoutes(app: Express) {
       if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
       const org = await getOrg(user.orgId);
+      if (!org) return res.status(401).json({ error: "Account org not found" });
+
       const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
       return res.json({
         token,
@@ -368,7 +392,7 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Admin-only role changes
+  // Admin-only role changes (HARDEN: user must belong to org)
   app.post(
     "/api/users/role",
     requireAuth,
@@ -378,7 +402,11 @@ export function registerRoutes(app: Express) {
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      const ok = await setUserRole((req as any).auth!.orgId, parsed.data.userId, parsed.data.role);
+      const auth = (req as any).auth!;
+      const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
+      if (!target) return;
+
+      const ok = await setUserRole(auth.orgId, parsed.data.userId, parsed.data.role);
       return res.json({ ok });
     }),
   );
@@ -390,8 +418,8 @@ export function registerRoutes(app: Express) {
     requireRole(["admin"]),
     wrap(async (req, res) => {
       const schema = z.object({
-        username: z.string().min(3).max(40),
-        password: z.string().min(6).max(200),
+        username: UsernameSchema,
+        password: PasswordSchema,
         role: z.enum(["user", "manager", "admin"]).default("user"),
       });
       const parsed = schema.safeParse(req.body);
@@ -435,31 +463,37 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Public: validate invite token
+  // Public: validate invite token (HARDEN: org must exist)
   app.get(
     "/api/invites/:token",
     wrap(async (req, res) => {
       const token = String(req.params.token || "");
       const invite = await getInvite(token);
       if (!invite) return res.status(404).json({ error: "Invite not found" });
-      if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
+      if (isExpired(invite.expiresAt)) return res.status(410).json({ error: "Invite expired" });
+
       const org = await getOrg(invite.orgId);
+      if (!org) return res.status(404).json({ error: "Org not found" });
+
       return res.json({ invite: { token: invite.token, role: invite.role, expiresAt: invite.expiresAt }, org });
     }),
   );
 
-  // Public: accept invite (creates user in that org)
+  // Public: accept invite (creates user in that org) (HARDEN: org must exist)
   app.post(
     "/api/invites/:token/accept",
     wrap(async (req, res) => {
       const token = String(req.params.token || "");
       const invite = await getInvite(token);
       if (!invite) return res.status(404).json({ error: "Invite not found" });
-      if (new Date(invite.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Invite expired" });
+      if (isExpired(invite.expiresAt)) return res.status(410).json({ error: "Invite expired" });
+
+      const org = await getOrg(invite.orgId);
+      if (!org) return res.status(404).json({ error: "Org not found" });
 
       const schema = z.object({
-        username: z.string().min(3).max(40),
-        password: z.string().min(6).max(200),
+        username: UsernameSchema,
+        password: PasswordSchema,
       });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -474,9 +508,9 @@ export function registerRoutes(app: Express) {
         role: invite.role,
       });
 
+      // one-time token
       await deleteInvite(token);
 
-      const org = await getOrg(invite.orgId);
       const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
       return res.json({
         token: jwt,
@@ -490,7 +524,7 @@ export function registerRoutes(app: Express) {
   app.post(
     "/api/auth/request-reset",
     wrap(async (req, res) => {
-      const schema = z.object({ username: z.string().min(3).max(40) });
+      const schema = z.object({ username: UsernameSchema });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -507,13 +541,13 @@ export function registerRoutes(app: Express) {
   app.post(
     "/api/auth/reset",
     wrap(async (req, res) => {
-      const schema = z.object({ token: z.string().min(10), newPassword: z.string().min(6).max(200) });
+      const schema = z.object({ token: z.string().min(10), newPassword: PasswordSchema });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const reset = await getPasswordReset(parsed.data.token);
       if (!reset) return res.status(404).json({ error: "Reset token not found" });
-      if (new Date(reset.expiresAt).getTime() < Date.now()) return res.status(410).json({ error: "Reset token expired" });
+      if (isExpired(reset.expiresAt)) return res.status(410).json({ error: "Reset token expired" });
 
       await setUserPassword(reset.userId, parsed.data.newPassword);
       await deletePasswordReset(reset.token);
@@ -521,23 +555,28 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Admin: generate reset token for a user (returns token directly)
+  // Admin: generate reset token for a user (returns token directly) (HARDEN: user must belong to org)
   app.post(
     "/api/admin/users/:id/reset-token",
     requireAuth,
     requireRole(["admin"]),
     wrap(async (req, res) => {
+      const auth = (req as any).auth!;
       const userId = String(req.params.id || "");
+
       const schema = z.object({ expiresInMinutes: z.number().int().min(10).max(1440).default(60) });
       const parsed = schema.safeParse(req.body || {});
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
+      const target = await assertUserInOrgOr404(auth.orgId, userId, res);
+      if (!target) return;
+
       const expiresAt = new Date(Date.now() + parsed.data.expiresInMinutes * 60 * 1000).toISOString();
       const reset = await createPasswordReset({
-        orgId: (req as any).auth!.orgId,
+        orgId: auth.orgId,
         userId,
         expiresAt,
-        createdBy: (req as any).auth!.userId,
+        createdBy: auth.userId,
       });
       return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
     }),
@@ -556,6 +595,12 @@ export function registerRoutes(app: Express) {
       const isStaff = auth.role === "admin" || auth.role === "manager";
       if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
 
+      // HARDEN: staff can only access profiles within their org
+      if (!isSelf) {
+        const target = await assertUserInOrgOr404(auth.orgId, userId, res);
+        if (!target) return;
+      }
+
       const profile = await getUserProfile(auth.orgId, userId);
       return res.json({ profile });
     }),
@@ -571,9 +616,15 @@ export function registerRoutes(app: Express) {
       const isStaff = auth.role === "admin" || auth.role === "manager";
       if (!isSelf && !isStaff) return res.status(403).json({ error: "Forbidden" });
 
+      // HARDEN: staff can only edit profiles within their org
+      if (!isSelf) {
+        const target = await assertUserInOrgOr404(auth.orgId, userId, res);
+        if (!target) return;
+      }
+
       const schema = z.object({
         fullName: z.string().max(80).optional().nullable(),
-        email: z.string().max(120).optional().nullable(),
+        email: z.string().email().max(120).optional().nullable(),
         phone: z.string().max(40).optional().nullable(),
         tags: z.array(z.string().max(24)).max(30).optional(),
       });
@@ -601,6 +652,12 @@ export function registerRoutes(app: Express) {
     requireRole(["admin", "manager"]),
     wrap(async (req, res) => {
       const userId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+
+      // HARDEN: only within org
+      const target = await assertUserInOrgOr404(auth.orgId, userId, res);
+      if (!target) return;
+
       const schema = z.object({ limit: z.string().optional() });
       const parsed = schema.safeParse(req.query);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -608,7 +665,7 @@ export function registerRoutes(app: Express) {
       const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
 
-      const notes = await listUserNotes({ orgId: (req as any).auth!.orgId, userId, limit });
+      const notes = await listUserNotes({ orgId: auth.orgId, userId, limit });
       return res.json({ notes });
     }),
   );
@@ -619,14 +676,20 @@ export function registerRoutes(app: Express) {
     requireRole(["admin", "manager"]),
     wrap(async (req, res) => {
       const userId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+
+      // HARDEN: only within org
+      const target = await assertUserInOrgOr404(auth.orgId, userId, res);
+      if (!target) return;
+
       const schema = z.object({ note: z.string().min(1).max(2000) });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const n = await addUserNote({
-        orgId: (req as any).auth!.orgId,
+        orgId: auth.orgId,
         userId,
-        authorId: (req as any).auth!.userId,
+        authorId: auth.userId,
         note: parsed.data.note,
       });
       return res.json({ note: n });
@@ -859,6 +922,14 @@ export function registerRoutes(app: Express) {
       const parsed = schema.safeParse(req.query);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
+      const auth = (req as any).auth!;
+
+      // HARDEN: if userId provided, ensure it's within org
+      if (parsed.data.userId) {
+        const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
+        if (!target) return;
+      }
+
       let sinceDayKey: string | undefined = undefined;
       if (parsed.data.sinceDays) {
         const n = Number(parsed.data.sinceDays);
@@ -867,7 +938,7 @@ export function registerRoutes(app: Express) {
       }
 
       const csv = await exportCheckinsCsv({
-        orgId: (req as any).auth!.orgId,
+        orgId: auth.orgId,
         userId: parsed.data.userId,
         sinceDayKey,
       });
