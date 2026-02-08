@@ -1,13 +1,23 @@
+// client/src/ui/InviteAcceptPage.tsx (FULL REPLACEMENT)
 import React from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import type { Role } from "../lib/api";
 import { api, setToken } from "../lib/api";
+
+function safeDateLabel(iso?: string) {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "—";
+  return new Date(iso).toLocaleString();
+}
 
 export default function InviteAcceptPage() {
   const { token } = useParams();
   const nav = useNavigate();
+
   const [loading, setLoading] = React.useState(true);
   const [orgName, setOrgName] = React.useState<string>("");
-  const [role, setRole] = React.useState<string>("");
+  const [role, setRole] = React.useState<Role | "">("");
   const [expiresAt, setExpiresAt] = React.useState<string>("");
   const [err, setErr] = React.useState<string | null>(null);
 
@@ -17,6 +27,7 @@ export default function InviteAcceptPage() {
 
   React.useEffect(() => {
     let alive = true;
+
     async function load() {
       setErr(null);
       setLoading(true);
@@ -24,17 +35,23 @@ export default function InviteAcceptPage() {
         if (!token) throw new Error("Missing invite token");
         const resp = await api.getInvite(token);
         if (!alive) return;
+
         setOrgName(resp.org?.name || "");
-        setRole(resp.invite?.role || "");
+        setRole((resp.invite?.role as any) || "");
         setExpiresAt(resp.invite?.expiresAt || "");
       } catch (e: any) {
-        setErr(e.message || "Invite not valid");
+        if (!alive) return;
+        setErr(e?.message || "Invite not valid");
       } finally {
+        if (!alive) return;
         setLoading(false);
       }
     }
+
     load();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [token]);
 
   async function accept(e: React.FormEvent) {
@@ -43,11 +60,16 @@ export default function InviteAcceptPage() {
     setSubmitting(true);
     try {
       if (!token) throw new Error("Missing token");
-      const resp = await api.acceptInvite(token, { username, password });
+
+      const u = username.trim();
+      if (!u) throw new Error("Username is required");
+      if (!password) throw new Error("Password is required");
+
+      const resp = await api.acceptInvite(token, { username: u, password });
       setToken(resp.token);
       nav("/dashboard");
     } catch (e: any) {
-      setErr(e.message || "Failed to accept invite");
+      setErr(e?.message || "Failed to accept invite");
     } finally {
       setSubmitting(false);
     }
@@ -59,30 +81,49 @@ export default function InviteAcceptPage() {
         <div className="hdr">
           <div>
             <h1>Join {orgName || "program"}</h1>
-            <div className="sub">You’re about to join as <b>{role || "user"}</b>.</div>
+            <div className="sub">
+              You’re about to join as <b>{role || "user"}</b>.
+            </div>
           </div>
           <span className="badge">Invite</span>
         </div>
+
         <div className="body">
           {loading ? (
             <div className="small">Loading invite…</div>
           ) : err ? (
-            <div className="small" style={{ color: "#fb7185" }}>{err}</div>
+            <div className="small" style={{ color: "#fb7185" }}>
+              {err}
+            </div>
           ) : (
             <>
-              <div className="small">Expires: {new Date(expiresAt).toLocaleString()}</div>
+              <div className="small">Expires: {safeDateLabel(expiresAt)}</div>
               <hr />
               <form onSubmit={accept} className="row" style={{ alignItems: "flex-end" }}>
                 <div className="col">
                   <div className="label">Choose a username</div>
-                  <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" />
+                  <input
+                    className="input"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
                 </div>
+
                 <div className="col">
                   <div className="label">Create a password</div>
-                  <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                  <input
+                    className="input"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
                 </div>
+
                 <div className="col" style={{ flexBasis: 200 }}>
-                  <button className="btn primary" disabled={submitting}>
+                  <button className="btn primary" disabled={submitting || !username.trim() || !password}>
                     {submitting ? "Joining..." : "Join and continue"}
                   </button>
                 </div>
