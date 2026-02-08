@@ -72,6 +72,17 @@ function normalizeTags(tags: any): string[] {
 }
 
 /**
+ * ✅ Critical hardening for JSONB params:
+ * pg will serialize JS arrays as Postgres arrays unless we stringify.
+ * Returning a JSON string + casting ::jsonb prevents:
+ * "invalid input syntax for type json"
+ */
+function jsonbParam(value: any) {
+  const arr = Array.isArray(value) ? value : [];
+  return JSON.stringify(normalizeTags(arr));
+}
+
+/**
  * Hardened JSONB array reader:
  * - pg often returns JSONB as JS arrays/objects
  * - but some environments/type-parsers can return strings
@@ -416,10 +427,10 @@ export async function createCheckIn(params: {
     createdAt: nowIso(),
   };
 
-  // ✅ Harden: store JSONB as an actual array (not a string)
+  // ✅ Harden: store JSONB via JSON string to avoid pg sending a Postgres array
   await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)`,
     [
       checkin.id,
       checkin.orgId,
@@ -430,7 +441,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      checkin.tags, // JSONB array
+      jsonbParam(checkin.tags), // ✅ JSONB
       checkin.createdAt,
     ],
   );
@@ -882,12 +893,12 @@ export async function getUserProfile(orgId: string, userId: string) {
 
   if (!row) {
     const now = nowIso();
-    // ✅ store JSONB as array
+    // ✅ Harden: store JSONB via JSON string + ::jsonb cast
     await q(
       `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId, orgId, null, null, null, [], now, now],
+      [userId, orgId, null, null, null, jsonbParam([]), now, now],
     );
     return {
       userId,
@@ -938,12 +949,12 @@ export async function upsertUserProfile(params: {
   const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
-  // ✅ store JSONB as array
+  // ✅ Harden: store JSONB via JSON string + ::jsonb cast
   await q(
     `UPDATE user_profiles
-     SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
+     SET full_name = $1, email = $2, phone = $3, tags_json = $4::jsonb, updated_at = $5
      WHERE org_id = $6 AND user_id = $7`,
-    [nextFullName, nextEmail, nextPhone, nextTags, now, params.orgId, params.userId],
+    [nextFullName, nextEmail, nextPhone, jsonbParam(nextTags), now, params.orgId, params.userId],
   );
 
   return getUserProfile(params.orgId, params.userId);
@@ -961,15 +972,10 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
-    row.id,
-    row.orgId,
-    row.userId,
-    row.authorId,
-    row.ts,
-    row.note,
-    row.createdAt,
-  ]);
+  await q(
+    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
+  );
 
   return row;
 }
