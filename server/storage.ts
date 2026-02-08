@@ -1,4 +1,4 @@
-// server/storage.ts (FULL REPLACEMENT — hardened minimal changes)
+// server/storage.ts (FULL REPLACEMENT — Option A: separate confessional table)
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -10,7 +10,7 @@ import type { Role } from "./types.js";
  * Required env:
  *   DATABASE_URL=postgres://...
  * Optional:
- *   PGSSLMODE=require   (Railway often works without this, but some setups need it)
+ *   PGSSLMODE=require
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
@@ -69,17 +69,6 @@ function normalizeTags(tags: any): string[] {
     .map((t) => String(t ?? "").trim())
     .filter(Boolean)
     .slice(0, 20);
-}
-
-/**
- * ✅ Critical hardening for JSONB params:
- * pg will serialize JS arrays as Postgres arrays unless we stringify.
- * Returning a JSON string + casting ::jsonb prevents:
- * "invalid input syntax for type json"
- */
-function jsonbParam(value: any) {
-  const arr = Array.isArray(value) ? value : [];
-  return JSON.stringify(normalizeTags(arr));
 }
 
 /**
@@ -220,6 +209,16 @@ export async function ensureDb() {
       note TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
+    // ✅ NEW: Confessional (private journal) — separate table (Option A)
+    `
+    CREATE TABLE IF NOT EXISTS confessional_entries (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TEXT NOT NULL
+    )`,
     `
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
@@ -297,6 +296,10 @@ export async function ensureDb() {
     `CREATE INDEX IF NOT EXISTS idx_profiles_org ON user_profiles(org_id)`,
 
     `CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts)`,
+
+    // ✅ NEW: confessional indexes
+    `CREATE INDEX IF NOT EXISTS idx_confessional_user_created ON confessional_entries(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_confessional_org_created ON confessional_entries(org_id, created_at DESC)`,
 
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC)`,
@@ -427,10 +430,10 @@ export async function createCheckIn(params: {
     createdAt: nowIso(),
   };
 
-  // ✅ Harden: store JSONB via JSON string to avoid pg sending a Postgres array
+  // ✅ Harden: store JSONB as an actual array (not a string)
   await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
     [
       checkin.id,
       checkin.orgId,
@@ -441,7 +444,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      jsonbParam(checkin.tags), // ✅ JSONB
+      checkin.tags, // JSONB array
       checkin.createdAt,
     ],
   );
@@ -679,6 +682,73 @@ export async function orgSummary(params: { orgId: string; days?: number }) {
   };
 }
 
+/** ✅ Confessional (Private Journal) */
+export async function createConfessionalEntry(params: {
+  orgId: string;
+  userId: string;
+  content: string;
+  tags?: string[];
+}) {
+  const createdAt = nowIso();
+  const tags = normalizeTags(params.tags ?? []);
+  const content = String(params.content ?? "").trim();
+
+  if (!content) {
+    throw new Error("Confessional entry content is required");
+  }
+
+  const row = {
+    id: nanoid(),
+    orgId: params.orgId,
+    userId: params.userId,
+    content,
+    tags,
+    tagsJson: JSON.stringify(tags), // keep client-friendly
+    createdAt,
+  };
+
+  await q(
+    `INSERT INTO confessional_entries (id, org_id, user_id, content, tags_json, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [row.id, row.orgId, row.userId, row.content, row.tags, row.createdAt],
+  );
+
+  return row;
+}
+
+export async function listConfessionalEntries(params: { orgId: string; userId: string; limit?: number }) {
+  const limit = Math.max(1, Math.min(params.limit ?? 50, 200));
+
+  const rows = await q<any>(
+    `SELECT * FROM confessional_entries
+     WHERE org_id = $1 AND user_id = $2
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [params.orgId, params.userId, limit],
+  );
+
+  return rows.map((r) => {
+    const tags = readJsonbArray(r.tags_json);
+    return {
+      id: r.id,
+      orgId: r.org_id,
+      userId: r.user_id,
+      content: r.content,
+      tags,
+      tagsJson: JSON.stringify(tags),
+      createdAt: r.created_at,
+    };
+  });
+}
+
+export async function deleteConfessionalEntry(orgId: string, userId: string, entryId: string) {
+  const rows = await q<{ count: string }>(
+    "WITH del AS (DELETE FROM confessional_entries WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
+    [entryId, orgId, userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
 /** Outlet analytics (manager/admin) */
 export async function outletAnalyticsSummary(params: { orgId: string; days?: number }) {
   const days = Math.max(7, Math.min(params.days ?? 30, 365));
@@ -893,12 +963,12 @@ export async function getUserProfile(orgId: string, userId: string) {
 
   if (!row) {
     const now = nowIso();
-    // ✅ Harden: store JSONB via JSON string + ::jsonb cast
+    // ✅ store JSONB as array
     await q(
       `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId, orgId, null, null, null, jsonbParam([]), now, now],
+      [userId, orgId, null, null, null, [], now, now],
     );
     return {
       userId,
@@ -949,12 +1019,12 @@ export async function upsertUserProfile(params: {
   const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
-  // ✅ Harden: store JSONB via JSON string + ::jsonb cast
+  // ✅ store JSONB as array
   await q(
     `UPDATE user_profiles
-     SET full_name = $1, email = $2, phone = $3, tags_json = $4::jsonb, updated_at = $5
+     SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
      WHERE org_id = $6 AND user_id = $7`,
-    [nextFullName, nextEmail, nextPhone, jsonbParam(nextTags), now, params.orgId, params.userId],
+    [nextFullName, nextEmail, nextPhone, nextTags, now, params.orgId, params.userId],
   );
 
   return getUserProfile(params.orgId, params.userId);
@@ -1063,7 +1133,10 @@ export async function createOutletSession(params: {
 }
 
 export async function getOutletSession(params: { orgId: string; sessionId: string }) {
-  const rows = await q<any>("SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]);
+  const rows = await q<any>("SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2", [
+    params.orgId,
+    params.sessionId,
+  ]);
   const r = rows[0];
   if (!r) return null;
 
@@ -1201,14 +1274,10 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     createdAt: nowIso(),
   };
 
-  await q(`INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [
-    msg.id,
-    msg.orgId,
-    msg.sessionId,
-    msg.sender,
-    msg.content,
-    msg.createdAt,
-  ]);
+  await q(
+    `INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+    [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
+  );
 
   await q(
     `UPDATE outlet_sessions
