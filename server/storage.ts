@@ -1,4 +1,4 @@
-// server/storage.ts (FULL REPLACEMENT — Option A: separate confessional table)
+// server/storage.ts (FULL REPLACEMENT — supports Option A + Option B + fixes "resolved")
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -93,8 +93,11 @@ function readJsonbArray(value: any): string[] {
 
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed";
+export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 export type OutletSender = "user" | "ai" | "staff";
+
+/** ✅ Option B: confessional as a “kind” inside outlet_sessions */
+export type OutletKind = "outlet" | "confessional";
 
 function normalizeVisibility(v: any): OutletVisibility {
   const s = String(v || "").toLowerCase();
@@ -105,6 +108,7 @@ function normalizeVisibility(v: any): OutletVisibility {
 
 function normalizeStatus(v: any): OutletStatus {
   const s = String(v || "").toLowerCase();
+  if (s === "resolved") return "resolved";
   if (s === "escalated") return "escalated";
   if (s === "closed") return "closed";
   return "open";
@@ -115,6 +119,12 @@ function normalizeSender(v: any): OutletSender {
   if (s === "ai") return "ai";
   if (s === "staff") return "staff";
   return "user";
+}
+
+function normalizeKind(v: any): OutletKind {
+  const s = String(v || "").toLowerCase();
+  if (s === "confessional") return "confessional";
+  return "outlet";
 }
 
 /**
@@ -209,7 +219,8 @@ export async function ensureDb() {
       note TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
-    // ✅ NEW: Confessional (private journal) — separate table (Option A)
+
+    // ✅ Option A: Confessional entries (private journal) — separate table
     `
     CREATE TABLE IF NOT EXISTS confessional_entries (
       id TEXT PRIMARY KEY,
@@ -219,21 +230,30 @@ export async function ensureDb() {
       tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TEXT NOT NULL
     )`,
+
+    // ✅ Outlet sessions (grievance office)
     `
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+      -- ✅ Option B: session kind (outlet vs confessional)
+      kind TEXT NOT NULL DEFAULT 'outlet',
+
       visibility TEXT NOT NULL DEFAULT 'private',
       category TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       risk_level INTEGER NOT NULL DEFAULT 0,
+
       last_message_at TEXT,
       last_sender TEXT,
       message_count INTEGER NOT NULL DEFAULT 0,
+
       resolution_note TEXT,
       resolved_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
       resolved_at TEXT,
+
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`,
@@ -260,6 +280,7 @@ export async function ensureDb() {
 
   // 2) Migration safety: add missing columns (each statement separately)
   await execMany([
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS kind TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS status TEXT`,
@@ -274,7 +295,8 @@ export async function ensureDb() {
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT`,
   ]);
 
-  // Defaults for existing rows where columns were just added (parameterized)
+  // Defaults for existing rows where columns were just added
+  await q(`UPDATE outlet_sessions SET kind = COALESCE(NULLIF(kind,''), 'outlet')`);
   await q(`UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`);
   await q(`UPDATE outlet_sessions SET status = COALESCE(status, 'open')`);
   await q(`UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`);
@@ -297,12 +319,13 @@ export async function ensureDb() {
 
     `CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts)`,
 
-    // ✅ NEW: confessional indexes
+    // ✅ confessional indexes (Option A)
     `CREATE INDEX IF NOT EXISTS idx_confessional_user_created ON confessional_entries(user_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_confessional_org_created ON confessional_entries(org_id, created_at DESC)`,
 
-    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC)`,
+    // ✅ outlet indexes (Option B included)
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_kind_updated ON outlet_sessions(org_id, kind, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_updated ON outlet_sessions(user_id, updated_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_status ON outlet_sessions(org_id, status)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_lastmsg ON outlet_sessions(org_id, last_message_at DESC)`,
@@ -425,12 +448,10 @@ export async function createCheckIn(params: {
     stress: params.stress,
     note: params.note ?? null,
     tags,
-    // keep API compatibility: still return tagsJson as a string
     tagsJson: JSON.stringify(tags),
     createdAt: nowIso(),
   };
 
-  // ✅ Harden: store JSONB as an actual array (not a string)
   await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
@@ -444,7 +465,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      checkin.tags, // JSONB array
+      checkin.tags,
       checkin.createdAt,
     ],
   );
@@ -485,7 +506,6 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
       stress: r.stress,
       note: r.note,
       tags,
-      // keep API compatibility
       tagsJson: JSON.stringify(tags),
       createdAt: r.created_at,
     };
@@ -682,20 +702,12 @@ export async function orgSummary(params: { orgId: string; days?: number }) {
   };
 }
 
-/** ✅ Confessional (Private Journal) */
-export async function createConfessionalEntry(params: {
-  orgId: string;
-  userId: string;
-  content: string;
-  tags?: string[];
-}) {
+/** ✅ Confessional (Private Journal) — Option A */
+export async function createConfessionalEntry(params: { orgId: string; userId: string; content: string; tags?: string[] }) {
   const createdAt = nowIso();
   const tags = normalizeTags(params.tags ?? []);
   const content = String(params.content ?? "").trim();
-
-  if (!content) {
-    throw new Error("Confessional entry content is required");
-  }
+  if (!content) throw new Error("Confessional entry content is required");
 
   const row = {
     id: nanoid(),
@@ -703,7 +715,7 @@ export async function createConfessionalEntry(params: {
     userId: params.userId,
     content,
     tags,
-    tagsJson: JSON.stringify(tags), // keep client-friendly
+    tagsJson: JSON.stringify(tags),
     createdAt,
   };
 
@@ -754,6 +766,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
   const days = Math.max(7, Math.min(params.days ?? 30, 365));
   const sinceIso = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString();
 
+  // Only summarize real “outlet” sessions (not confessional kind)
   const totalsRows = await q<any>(
     `
     SELECT
@@ -761,9 +774,10 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as sessions_open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as sessions_escalated,
       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as sessions_closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as sessions_resolved,
       AVG(risk_level)::float as risk_avg
     FROM outlet_sessions
-    WHERE org_id = $1 AND created_at >= $2
+    WHERE org_id = $1 AND created_at >= $2 AND kind = 'outlet'
     `,
     [params.orgId, sinceIso],
   );
@@ -777,9 +791,10 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       AVG(risk_level)::float as risk_avg,
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as escalated,
-      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as resolved
     FROM outlet_sessions
-    WHERE org_id = $1 AND created_at >= $2
+    WHERE org_id = $1 AND created_at >= $2 AND kind = 'outlet'
     GROUP BY 1
     ORDER BY sessions DESC
     `,
@@ -793,7 +808,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       COUNT(*)::int as sessions,
       AVG(risk_level)::float as risk_avg
     FROM outlet_sessions
-    WHERE org_id = $1 AND created_at >= $2
+    WHERE org_id = $1 AND created_at >= $2 AND kind = 'outlet'
     GROUP BY 1
     ORDER BY day_key ASC
     `,
@@ -815,7 +830,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       s.updated_at
     FROM outlet_sessions s
     JOIN users u ON u.id = s.user_id
-    WHERE s.org_id = $1 AND s.created_at >= $2
+    WHERE s.org_id = $1 AND s.created_at >= $2 AND s.kind = 'outlet'
     ORDER BY s.risk_level DESC, s.updated_at DESC
     LIMIT 15
     `,
@@ -829,6 +844,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: totals.sessions_open ?? 0,
       escalated: totals.sessions_escalated ?? 0,
       closed: totals.sessions_closed ?? 0,
+      resolved: totals.sessions_resolved ?? 0,
       riskAvg: totals.risk_avg ?? null,
     },
     byCategory: (byCategory || []).map((r: any) => ({
@@ -838,6 +854,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: r.open,
       escalated: r.escalated,
       closed: r.closed,
+      resolved: r.resolved,
     })),
     byDay: (byDay || []).map((r: any) => ({
       dayKey: r.day_key,
@@ -963,7 +980,6 @@ export async function getUserProfile(orgId: string, userId: string) {
 
   if (!row) {
     const now = nowIso();
-    // ✅ store JSONB as array
     await q(
       `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1019,7 +1035,6 @@ export async function upsertUserProfile(params: {
   const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
-  // ✅ store JSONB as array
   await q(
     `UPDATE user_profiles
      SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
@@ -1042,10 +1057,15 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q(
-    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
-  );
+  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
+    row.id,
+    row.orgId,
+    row.userId,
+    row.authorId,
+    row.ts,
+    row.note,
+    row.createdAt,
+  ]);
 
   return row;
 }
@@ -1082,13 +1102,21 @@ export async function createOutletSession(params: {
   category?: string | null;
   visibility?: OutletVisibility;
   riskLevel?: number;
+  kind?: OutletKind; // ✅ Option B
 }) {
   const now = nowIso();
+
+  const kind = (params.kind ?? "outlet") as OutletKind;
+
+  // ✅ Confessional sessions are always private and never staff-visible
+  const effectiveVisibility: OutletVisibility = kind === "confessional" ? "private" : (params.visibility ?? "private");
+
   const row = {
     id: nanoid(),
     orgId: params.orgId,
     userId: params.userId,
-    visibility: (params.visibility ?? "private") as OutletVisibility,
+    kind,
+    visibility: effectiveVisibility,
     category: (params.category ?? null)?.trim?.() ?? params.category ?? null,
     status: "open" as OutletStatus,
     riskLevel: toInt(params.riskLevel, 0),
@@ -1104,16 +1132,17 @@ export async function createOutletSession(params: {
 
   await q(
     `INSERT INTO outlet_sessions (
-        id, org_id, user_id, visibility, category, status, risk_level,
+        id, org_id, user_id, kind, visibility, category, status, risk_level,
         last_message_at, last_sender, message_count,
         resolution_note, resolved_by_user_id, resolved_at,
         created_at, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
     [
       row.id,
       row.orgId,
       row.userId,
+      row.kind,
       row.visibility,
       row.category,
       row.status,
@@ -1144,6 +1173,7 @@ export async function getOutletSession(params: { orgId: string; sessionId: strin
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1173,6 +1203,7 @@ export async function listOutletSessionsForUser(params: { orgId: string; userId:
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1192,6 +1223,9 @@ export async function listOutletSessionsForStaff(params: { orgId: string; role: 
   const limit = Math.max(1, Math.min(params.limit ?? 100, 300));
   if (params.role !== "manager" && params.role !== "admin") return [];
 
+  // ✅ Staff NEVER sees confessional kind
+  const onlyOutletKind = `s.kind = 'outlet'`;
+
   const visibilityClause =
     params.role === "admin" ? `(s.visibility = 'admin' OR s.visibility = 'manager')` : `(s.visibility = 'manager')`;
 
@@ -1210,6 +1244,7 @@ export async function listOutletSessionsForStaff(params: { orgId: string; role: 
     SELECT s.*
     FROM outlet_sessions s
     WHERE s.org_id = $1
+      AND ${onlyOutletKind}
       AND (
         ${visibilityClause}
         OR s.id IN (
@@ -1231,6 +1266,7 @@ export async function listOutletSessionsForStaff(params: { orgId: string; role: 
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1301,6 +1337,12 @@ export async function escalateOutletSession(params: {
   reason?: string | null;
 }) {
   const now = nowIso();
+
+  // ✅ prevent escalation of confessional kind
+  const sess = await getOutletSession({ orgId: params.orgId, sessionId: params.sessionId });
+  if (!sess) throw new Error("Session not found");
+  if (sess.kind === "confessional") throw new Error("Confessional sessions cannot be escalated");
+
   const esc = {
     id: nanoid(),
     orgId: params.orgId,
@@ -1344,12 +1386,17 @@ export async function resolveOutletSession(params: {
   const now = nowIso();
   const note = (params.resolutionNote ?? null)?.trim?.() ?? params.resolutionNote ?? null;
 
+  // ✅ resolve only for outlet kind
+  const sess = await getOutletSession({ orgId: params.orgId, sessionId: params.sessionId });
+  if (!sess) throw new Error("Session not found");
+  if (sess.kind === "confessional") throw new Error("Confessional sessions cannot be resolved by staff");
+
   const rows = await q<{ count: string }>(
     `
     WITH upd AS (
       UPDATE outlet_sessions
       SET
-        status = 'closed',
+        status = 'resolved',
         resolution_note = $1,
         resolved_by_user_id = $2,
         resolved_at = $3,
