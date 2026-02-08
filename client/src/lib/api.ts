@@ -1,5 +1,4 @@
-// client/src/lib/api.ts (FULL REPLACEMENT)
-
+// client/src/lib/api.ts (FULL REPLACEMENT — adds OutletKind + session.kind + create payload supports both)
 export type Role = "user" | "manager" | "admin";
 
 export type AuthUser = { id: string; username: string; orgId: string; role: Role };
@@ -81,16 +80,16 @@ export type Summary = {
 
 /** Outlet / Counselor’s Office */
 export type OutletVisibility = "private" | "manager" | "admin";
-/**
- * Backend uses: open | escalated | closed | resolved
- * (resolved is supported by your UI + storage.ts replacement)
- */
 export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
+export type OutletKind = "outlet" | "confessional";
 
 export type OutletSession = {
   id: string;
   orgId: string;
   userId: string;
+
+  kind: OutletKind; // ✅ Option B
+
   visibility: OutletVisibility;
   category: string | null;
   status: OutletStatus;
@@ -99,7 +98,6 @@ export type OutletSession = {
   createdAt: string;
   updatedAt: string;
 
-  // optional backend fields
   lastMessageAt?: string | null;
   lastSender?: "user" | "ai" | "staff" | null;
   messageCount?: number;
@@ -113,7 +111,7 @@ export type OutletMessage = {
   id: string;
   orgId: string;
   sessionId: string;
-  sender: "user" | "ai" | "staff"; // forward-safe
+  sender: "user" | "ai" | "staff";
   content: string;
   createdAt: string;
 };
@@ -121,11 +119,9 @@ export type OutletMessage = {
 const TOKEN_KEY = "levelup_token";
 const LEGACY_TOKEN_KEYS = ["token", "levelupToken", "jwt"] as const;
 
-/** Read token (supports legacy keys for older builds) */
 export function getToken() {
   const t = localStorage.getItem(TOKEN_KEY);
   if (t) return t;
-
   for (const k of LEGACY_TOKEN_KEYS) {
     const v = localStorage.getItem(k);
     if (v) return v;
@@ -133,7 +129,6 @@ export function getToken() {
   return null;
 }
 
-/** Write token + keep storage clean */
 export function setToken(t: string | null) {
   if (!t) {
     localStorage.removeItem(TOKEN_KEY);
@@ -144,11 +139,6 @@ export function setToken(t: string | null) {
   for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
 }
 
-/**
- * Optional absolute API base:
- *   VITE_API_BASE=https://your-api-domain
- * Defaults to same-origin.
- */
 const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
 function apiUrl(path: string) {
   if (!path.startsWith("/")) path = `/${path}`;
@@ -159,7 +149,6 @@ function bestErrorMessage(data: any): string {
   const msg = data?.error?.message ?? data?.error ?? data?.message ?? data?.detail ?? data?.statusText ?? null;
   if (typeof msg === "string" && msg.trim()) return msg.trim();
 
-  // zod-like
   const fieldErrors = data?.error?.fieldErrors;
   if (fieldErrors && typeof fieldErrors === "object") {
     const k = Object.keys(fieldErrors)[0];
@@ -199,7 +188,7 @@ async function req<T>(method: string, url: string, body?: any): Promise<T> {
   return data as T;
 }
 
-/** Backwards-compatible helpers (older pages import these) */
+/** Backwards-compatible helpers */
 export type AuthPayload = { userId: string; orgId: string; role: Role; username?: string };
 
 export function apiGet<T>(url: string) {
@@ -217,11 +206,7 @@ export function apiDelete<T>(url: string) {
 
 export const api = {
   async register(orgName: string, username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", {
-      orgName,
-      username,
-      password,
-    });
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
   },
   async login(username: string, password: string) {
     return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
@@ -253,10 +238,7 @@ export const api = {
     return req<{ habit: Habit }>("POST", "/api/habits", payload);
   },
   async listHabits(includeArchived = false) {
-    return req<{ habits: Habit[] }>(
-      "GET",
-      `/api/habits?includeArchived=${encodeURIComponent(includeArchived ? "1" : "0")}`,
-    );
+    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${encodeURIComponent(includeArchived ? "1" : "0")}`);
   },
   async archiveHabit(id: string) {
     return req<{ ok: boolean }>("POST", `/api/habits/${encodeURIComponent(id)}/archive`);
@@ -276,11 +258,7 @@ export const api = {
     return req<{ invite: InviteInfo; org: Org }>("GET", `/api/invites/${encodeURIComponent(token)}`);
   },
   async acceptInvite(token: string, payload: { username: string; password: string }) {
-    return req<{ token: string; user: AuthUser; org: Org }>(
-      "POST",
-      `/api/invites/${encodeURIComponent(token)}/accept`,
-      payload,
-    );
+    return req<{ token: string; user: AuthUser; org: Org }>("POST", `/api/invites/${encodeURIComponent(token)}/accept`, payload);
   },
 
   async requestPasswordReset(username: string) {
@@ -290,50 +268,36 @@ export const api = {
     return req<{ ok: boolean }>("POST", "/api/auth/reset", { token, newPassword });
   },
   async adminCreateResetToken(userId: string, expiresInMinutes = 60) {
-    return req<{ reset: { token: string; expiresAt: string } }>(
-      "POST",
-      `/api/admin/users/${encodeURIComponent(userId)}/reset-token`,
-      { expiresInMinutes },
-    );
+    return req<{ reset: { token: string; expiresAt: string } }>("POST", `/api/admin/users/${encodeURIComponent(userId)}/reset-token`, {
+      expiresInMinutes,
+    });
   },
 
   async getProfile(userId: string) {
     return req<{ profile: UserProfile }>("GET", `/api/users/${encodeURIComponent(userId)}/profile`);
   },
-  async updateProfile(
-    userId: string,
-    payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] },
-  ) {
+  async updateProfile(userId: string, payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] }) {
     return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
   },
   async listNotes(userId: string, limit = 100) {
-    return req<{ notes: UserNote[] }>(
-      "GET",
-      `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`,
-    );
+    return req<{ notes: UserNote[] }>("GET", `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`);
   },
   async addNote(userId: string, note: string) {
     return req<{ note: any }>("POST", `/api/users/${encodeURIComponent(userId)}/notes`, { note });
   },
 
   /** Outlet / Counselor’s Office */
-  async outletCreateSession(payload: { category?: string | null; visibility?: OutletVisibility }) {
+  async outletCreateSession(payload: { kind?: OutletKind; category?: string | null; visibility?: OutletVisibility }) {
     return req<{ session: OutletSession }>("POST", "/api/outlet/sessions", payload);
   },
   async outletListMySessions(limit = 50) {
     return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?limit=${encodeURIComponent(String(limit))}`);
   },
   async outletListStaffSessions(limit = 200) {
-    return req<{ sessions: OutletSession[] }>(
-      "GET",
-      `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`,
-    );
+    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
   },
   async outletGetSession(sessionId: string) {
-    return req<{ session: OutletSession; messages: OutletMessage[] }>(
-      "GET",
-      `/api/outlet/sessions/${encodeURIComponent(sessionId)}`,
-    );
+    return req<{ session: OutletSession; messages: OutletMessage[] }>("GET", `/api/outlet/sessions/${encodeURIComponent(sessionId)}`);
   },
   async outletSendMessage(sessionId: string, content: string) {
     return req<{ userMessage: OutletMessage; aiMessage: OutletMessage; riskLevel: number }>(
@@ -342,22 +306,15 @@ export const api = {
       { content },
     );
   },
-  async outletEscalate(
-    sessionId: string,
-    payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null },
-  ) {
+  async outletEscalate(sessionId: string, payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null }) {
     return req<{ escalation: any }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/escalate`, payload);
   },
   async outletClose(sessionId: string) {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
   },
-
-  /** Staff resolve (manager/admin) */
   async outletResolve(sessionId: string, payload?: { resolutionNote?: string | null }) {
     return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/resolve`, payload || {});
   },
-
-  /** Optional: Outlet analytics (manager/admin) */
   async outletAnalyticsSummary(days = 30) {
     return req<{ summary: any }>("GET", `/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
