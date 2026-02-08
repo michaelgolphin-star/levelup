@@ -1,4 +1,4 @@
-// server/routes.ts (FULL REPLACEMENT)
+// server/routes.ts (FULL REPLACEMENT — adds Confessional Option A endpoints)
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
@@ -44,6 +44,11 @@ import {
   // NEW: outlet admin helpers
   resolveOutletSession,
   outletAnalyticsSummary,
+
+  // ✅ Confessional (Option A)
+  createConfessionalEntry,
+  listConfessionalEntries,
+  deleteConfessionalEntry,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
 
@@ -293,6 +298,12 @@ const OutletResolveSchema = z.object({
   resolutionNote: z.string().max(2000).optional().nullable(),
 });
 
+// ✅ Confessional schemas (Option A)
+const ConfessionalCreateSchema = z.object({
+  content: z.string().min(1).max(8000),
+  tags: z.array(z.string().max(24)).max(20).optional(),
+});
+
 async function staffCanAccessOutletSession(auth: any, sessionId: string): Promise<boolean> {
   const role = auth?.role;
   if (role !== "admin" && role !== "manager") return false;
@@ -386,8 +397,8 @@ export function registerRoutes(app: Express) {
     "/api/users",
     requireAuth,
     requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const users = await listUsers((req as any).auth!.orgId);
+    wrap(async (_req, res) => {
+      const users = await listUsers((_req as any).auth!.orgId);
       return res.json({ users });
     }),
   );
@@ -693,6 +704,56 @@ export function registerRoutes(app: Express) {
         note: parsed.data.note,
       });
       return res.json({ note: n });
+    }),
+  );
+
+  // -----------------------------
+  // ✅ Confessional (Option A) — PRIVATE to the user
+  // -----------------------------
+  app.post(
+    "/api/confessional",
+    requireAuth,
+    wrap(async (req, res) => {
+      const parsed = ConfessionalCreateSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const entry = await createConfessionalEntry({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        content: parsed.data.content,
+        tags: parsed.data.tags ?? [],
+      });
+
+      return res.json({ entry });
+    }),
+  );
+
+  app.get(
+    "/api/confessional",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({ limit: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
+
+      const entries = await listConfessionalEntries({ orgId: auth.orgId, userId: auth.userId, limit });
+      return res.json({ entries });
+    }),
+  );
+
+  app.delete(
+    "/api/confessional/:id",
+    requireAuth,
+    wrap(async (req, res) => {
+      const id = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await deleteConfessionalEntry(auth.orgId, auth.userId, id);
+      return res.json({ ok: !!ok });
     }),
   );
 
