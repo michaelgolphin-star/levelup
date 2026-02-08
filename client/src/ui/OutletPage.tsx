@@ -1,8 +1,7 @@
-// client/src/ui/OutletPage.tsx (FULL REPLACEMENT)
-
+// client/src/ui/OutletPage.tsx (FULL REPLACEMENT — adds kind picker + hides staff actions for confessional)
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { AuthPayload, Role } from "../lib/api";
+import type { AuthPayload, Role, OutletKind } from "../lib/api";
 import { api, apiGet } from "../lib/api";
 
 type OutletVisibility = "private" | "manager" | "admin";
@@ -18,6 +17,10 @@ function visLabel(v: OutletVisibility) {
   if (v === "admin") return "Admin";
   if (v === "manager") return "Manager";
   return "Private";
+}
+
+function kindLabel(k: OutletKind) {
+  return k === "confessional" ? "Confessional" : "Counselor Session";
 }
 
 function statusLabel(s: OutletStatus) {
@@ -48,6 +51,7 @@ export function OutletHomePage() {
   const [msg, setMsg] = useState<string | null>(null);
 
   // Create form
+  const [kind, setKind] = useState<OutletKind>("outlet");
   const [category, setCategory] = useState("");
   const [visibility, setVisibility] = useState<OutletVisibility>("private");
 
@@ -66,7 +70,7 @@ export function OutletHomePage() {
         const r = await api.outletListStaffSessions(200);
         setSessions(r.sessions || []);
       } else {
-        const r = await api.outletListMySessions(50);
+        const r = await api.outletListMySessions(80);
         setSessions(r.sessions || []);
       }
     } catch (e: any) {
@@ -80,8 +84,9 @@ export function OutletHomePage() {
     setMsg(null);
     try {
       const r = await api.outletCreateSession({
-        category: category.trim() ? category.trim() : null,
-        visibility,
+        kind,
+        category: kind === "confessional" ? null : category.trim() ? category.trim() : null,
+        visibility: kind === "confessional" ? "private" : visibility,
       });
       nav(`/outlet/${r.session.id}`);
     } catch (e: any) {
@@ -107,7 +112,6 @@ export function OutletHomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
-  // polish: focus the Category field when this page opens
   useEffect(() => {
     const t = setTimeout(() => categoryRef.current?.focus(), 50);
     return () => clearTimeout(t);
@@ -124,14 +128,14 @@ export function OutletHomePage() {
         <div className="hdr">
           <div>
             <h1>Counselor’s Office</h1>
-            <div className="sub">Private outlet + documentation + escalation (if needed).</div>
+            <div className="sub">Counselor sessions + Confessional (private journaling).</div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Link className="btn" to="/dashboard">
               Dashboard
             </Link>
             <button className="btn primary" onClick={createSession}>
-              New session
+              New
             </button>
           </div>
         </div>
@@ -140,11 +144,22 @@ export function OutletHomePage() {
           <div className="grid2">
             <div className="panel">
               <div className="panelTitle">
-                <span>Create a new session</span>
-                <span className="badge">{visLabel(visibility)} visibility</span>
+                <span>Create</span>
+                <span className="badge">{kindLabel(kind)}</span>
               </div>
 
               <div className="row" style={{ marginTop: 12 }}>
+                <div className="col" style={{ flexBasis: 240 }}>
+                  <div className="label">Mode</div>
+                  <select className="select" value={kind} onChange={(e) => setKind(e.target.value as OutletKind)}>
+                    <option value="outlet">Counselor session</option>
+                    <option value="confessional">Confessional (private)</option>
+                  </select>
+                  <div className="small" style={{ marginTop: 6 }}>
+                    Confessional is always private and never visible to staff.
+                  </div>
+                </div>
+
                 <div className="col">
                   <div className="label">Category (optional)</div>
                   <input
@@ -152,7 +167,8 @@ export function OutletHomePage() {
                     className="input"
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
-                    placeholder="pay, scheduling, conflict, safety…"
+                    placeholder={kind === "confessional" ? "disabled for confessional" : "pay, scheduling, conflict, safety…"}
+                    disabled={kind === "confessional"}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") createSession();
                     }}
@@ -163,29 +179,26 @@ export function OutletHomePage() {
                   <div className="label">Visibility</div>
                   <select
                     className="select"
-                    value={visibility}
+                    value={kind === "confessional" ? "private" : visibility}
                     onChange={(e) => setVisibility(e.target.value as OutletVisibility)}
+                    disabled={kind === "confessional"}
                   >
                     <option value="private">private (only you)</option>
                     <option value="manager">manager</option>
                     <option value="admin">admin</option>
                   </select>
-                  {!isAdmin && visibility === "admin" ? (
+                  {!isAdmin && visibility === "admin" && kind !== "confessional" ? (
                     <div className="small" style={{ marginTop: 6 }}>
                       Note: only admins can view admin-only sessions.
                     </div>
                   ) : null}
                 </div>
 
-                <div className="col" style={{ flexBasis: 180, alignSelf: "flex-end" }}>
+                <div className="col" style={{ flexBasis: 160, alignSelf: "flex-end" }}>
                   <button className="btn primary" onClick={createSession}>
                     Start
                   </button>
                 </div>
-              </div>
-
-              <div className="small" style={{ marginTop: 10 }}>
-                Tip: Keep “private” unless you’re ready for management to see it.
               </div>
 
               {msg ? <div className="toast bad">{msg}</div> : null}
@@ -228,15 +241,14 @@ export function OutletHomePage() {
 
               {loading ? <div className="small" style={{ marginTop: 12 }}>Loading…</div> : null}
 
-              {!loading && sessions.length === 0 ? (
-                <div className="small" style={{ marginTop: 12 }}>No sessions yet.</div>
-              ) : null}
+              {!loading && sessions.length === 0 ? <div className="small" style={{ marginTop: 12 }}>No sessions yet.</div> : null}
 
               <div className="list">
                 {sessions.map((s) => {
                   const rb = riskBadge(Number(s.riskLevel || 0));
                   const last = formatTs(s.lastMessageAt || s.updatedAt || s.createdAt);
                   const st: OutletStatus = (s.status as OutletStatus) || "open";
+                  const k: OutletKind = (s.kind as OutletKind) || "outlet";
                   return (
                     <div
                       key={s.id}
@@ -250,9 +262,11 @@ export function OutletHomePage() {
                     >
                       <div className="listTop">
                         <div>
-                          <div className="listTitle">{s.category ? s.category : "General"}</div>
+                          <div className="listTitle">
+                            {k === "confessional" ? "Confessional" : s.category ? s.category : "General"}
+                          </div>
                           <div className="small">
-                            {statusLabel(st)} • {visLabel(s.visibility)} • Created {formatTs(s.createdAt)}
+                            {kindLabel(k)} • {statusLabel(st)} • {visLabel(s.visibility)} • Created {formatTs(s.createdAt)}
                             {last ? (
                               <>
                                 {" "}
@@ -274,7 +288,7 @@ export function OutletHomePage() {
               </div>
 
               <div className="small" style={{ marginTop: 10 }}>
-                Staff view shows sessions only when visibility permits (manager/admin rules).
+                Staff view shows only “Counselor sessions” where visibility permits (confessional is never shown).
               </div>
             </div>
           </div>
@@ -308,7 +322,7 @@ export function OutletSessionPage() {
   const [confirmClose, setConfirmClose] = useState(false);
   const [escalating, setEscalating] = useState(false);
 
-  // Staff resolve UI (manager/admin)
+  // Staff resolve UI
   const [resolutionNote, setResolutionNote] = useState("");
   const [resolving, setResolving] = useState(false);
 
@@ -316,8 +330,12 @@ export function OutletSessionPage() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const isOwner = !!(auth?.userId && session?.userId && auth.userId === session.userId);
-  const canEscalate = isOwner || isStaff;
-  const canClose = isOwner || isStaff;
+
+  const kind: OutletKind = (session?.kind as OutletKind) || "outlet";
+  const isConfessional = kind === "confessional";
+
+  const canEscalate = (isOwner || isStaff) && !isConfessional;
+  const canClose = isOwner || (isStaff && !isConfessional); // staff can’t close confessional
 
   async function loadAuth() {
     const me = await apiGet<{ auth: AuthPayload }>("/api/me");
@@ -352,7 +370,7 @@ export function OutletSessionPage() {
       const r = await api.outletSendMessage(id, text);
       setInput("");
       setMessages((m) => [...m, r.userMessage, r.aiMessage]);
-      if (Number(r.riskLevel || 0) >= 2) {
+      if (Number(r.riskLevel || 0) >= 2 && !isConfessional) {
         setToast({ type: "bad", text: "Safety/risk keywords detected → auto-escalated to admin." });
       }
     } catch (e: any) {
@@ -396,7 +414,7 @@ export function OutletSessionPage() {
   }
 
   async function resolveSession() {
-    if (!id || !isStaff) return;
+    if (!id || !isStaff || isConfessional) return;
     setToast(null);
     setResolving(true);
     try {
@@ -422,7 +440,6 @@ export function OutletSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // polish: focus the message box for the owner, and scroll chat to bottom
   useEffect(() => {
     if (!loading && isOwner && session?.status !== "closed" && session?.status !== "resolved") {
       const t = setTimeout(() => messageRef.current?.focus(), 50);
@@ -431,9 +448,7 @@ export function OutletSessionPage() {
   }, [loading, isOwner, session?.status]);
 
   useEffect(() => {
-    if (!loading) {
-      chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
+    if (!loading) chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [loading, messages.length]);
 
   const rb = riskBadge(Number(session?.riskLevel || 0));
@@ -447,11 +462,12 @@ export function OutletSessionPage() {
       <div className="card">
         <div className="hdr">
           <div>
-            <h1>Counselor’s Office</h1>
+            <h1>{isConfessional ? "Confessional" : "Counselor’s Office"}</h1>
             <div className="sub">
               {session ? (
                 <>
-                  {session.category ? session.category : "General"} • {statusLabel(st)} • {visLabel(session.visibility)}
+                  {isConfessional ? "Private journaling session" : session.category ? session.category : "General"} •{" "}
+                  {statusLabel(st)} • {visLabel(session.visibility)}
                 </>
               ) : (
                 "Session"
@@ -470,7 +486,6 @@ export function OutletSessionPage() {
 
         <div className="body">
           {toast ? <div className={`toast ${toast.type}`}>{toast.text}</div> : null}
-
           {loading ? <div className="small">Loading…</div> : null}
 
           {!loading && session ? (
@@ -484,8 +499,8 @@ export function OutletSessionPage() {
                 <div className="chatBox" style={{ marginTop: 12 }}>
                   <div className="chatList">
                     {messages.map((m) => {
-                      const who = m.sender === "user" ? "You" : m.sender === "staff" ? "Staff" : "Counselor";
-                      const bubbleCls = m.sender === "user" ? "user" : "ai"; // keep styling simple for MVP
+                      const who = m.sender === "user" ? "You" : m.sender === "staff" ? "Staff" : isConfessional ? "Reflector" : "Counselor";
+                      const bubbleCls = m.sender === "user" ? "user" : "ai";
                       return (
                         <div key={m.id} className={`bubble ${bubbleCls}`}>
                           <div className="bubbleMeta">
@@ -503,9 +518,7 @@ export function OutletSessionPage() {
 
                 <div style={{ marginTop: 12 }}>
                   {!isOwner ? (
-                    <div className="small">
-                      You’re viewing as staff. Messages are read-only in this MVP (only the owner can send).
-                    </div>
+                    <div className="small">You’re viewing as staff. Messages are read-only in this MVP.</div>
                   ) : null}
 
                   <div className="row" style={{ marginTop: 10, alignItems: "flex-end" }}>
@@ -515,7 +528,7 @@ export function OutletSessionPage() {
                         ref={messageRef}
                         className="textarea"
                         rows={3}
-                        placeholder="Type what’s on your mind…"
+                        placeholder={isConfessional ? "Write anything…" : "Type what’s on your mind…"}
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         disabled={!isOwner || sending || isClosed || isResolved}
@@ -523,28 +536,16 @@ export function OutletSessionPage() {
                           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") send();
                         }}
                       />
-                      {isOwner && !isClosed && !isResolved ? (
-                        <div className="small" style={{ marginTop: 6 }}>
-                          Tip: Ctrl/⌘ + Enter to send
-                        </div>
-                      ) : null}
+                      {isOwner && !isClosed && !isResolved ? <div className="small" style={{ marginTop: 6 }}>Tip: Ctrl/⌘ + Enter to send</div> : null}
                     </div>
                     <div className="col" style={{ flexBasis: 160 }}>
-                      <button
-                        className="btn primary"
-                        onClick={send}
-                        disabled={!isOwner || sending || !input.trim() || isClosed || isResolved}
-                      >
+                      <button className="btn primary" onClick={send} disabled={!isOwner || sending || !input.trim() || isClosed || isResolved}>
                         {sending ? "Sending…" : "Send"}
                       </button>
                     </div>
                   </div>
 
-                  {isClosed || isResolved ? (
-                    <div className="small" style={{ marginTop: 10 }}>
-                      This session is {isResolved ? "resolved" : "closed"}. You can start a new session anytime.
-                    </div>
-                  ) : null}
+                  {isClosed || isResolved ? <div className="small" style={{ marginTop: 10 }}>This session is {isResolved ? "resolved" : "closed"}.</div> : null}
                 </div>
               </div>
 
@@ -562,18 +563,28 @@ export function OutletSessionPage() {
                         <div className="small">{statusLabel(st)}</div>
                       </div>
                       <div className="chips">
+                        <span className="badge">{kindLabel(kind)}</span>
                         <span className="badge">{visLabel(session.visibility)}</span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Staff-only resolve */}
-                  {isStaff ? (
+                  {isConfessional ? (
+                    <div className="listItemStatic">
+                      <div className="listTitle">Confessional rules</div>
+                      <div className="small" style={{ marginTop: 6 }}>
+                        • Always private<br />
+                        • Not visible to staff<br />
+                        • No escalation / resolution workflow
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Staff-only resolve (only outlet kind) */}
+                  {!isConfessional && isStaff ? (
                     <div className="listItemStatic">
                       <div className="listTitle">Resolve (staff)</div>
-                      <div className="small" style={{ marginTop: 6 }}>
-                        Mark as handled and add a short resolution note (optional).
-                      </div>
+                      <div className="small" style={{ marginTop: 6 }}>Mark as handled and add a short resolution note (optional).</div>
 
                       <div style={{ marginTop: 10 }}>
                         <div className="label">Resolution note (optional)</div>
@@ -588,132 +599,103 @@ export function OutletSessionPage() {
                       </div>
 
                       <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-                        <button
-                          className="btn primary"
-                          onClick={resolveSession}
-                          disabled={resolving || isClosed || isResolved}
-                        >
+                        <button className="btn primary" onClick={resolveSession} disabled={resolving || isClosed || isResolved}>
                           {isResolved ? "Resolved" : resolving ? "Resolving…" : "Mark resolved"}
                         </button>
                       </div>
-
-                      {isResolved ? (
-                        <div className="small" style={{ marginTop: 10 }}>
-                          This session is already resolved.
-                        </div>
-                      ) : null}
                     </div>
                   ) : null}
 
-                  <div className="listItemStatic">
-                    <div className="listTitle">Escalate</div>
-                    <div className="small" style={{ marginTop: 6 }}>
-                      Share this with management/admin (with your control).
-                    </div>
+                  {/* Escalate (only outlet kind) */}
+                  {!isConfessional ? (
+                    <div className="listItemStatic">
+                      <div className="listTitle">Escalate</div>
+                      <div className="small" style={{ marginTop: 6 }}>Share this with management/admin (with your control).</div>
 
-                    <div className="row" style={{ marginTop: 10 }}>
-                      <div className="col" style={{ flexBasis: 200 }}>
-                        <div className="label">Escalate to</div>
-                        <select
-                          className="select"
-                          value={escalateTo}
-                          onChange={(e) => setEscalateTo(e.target.value as any)}
-                          disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
-                        >
-                          <option value="manager">manager</option>
-                          <option value="admin">admin</option>
-                        </select>
+                      <div className="row" style={{ marginTop: 10 }}>
+                        <div className="col" style={{ flexBasis: 200 }}>
+                          <div className="label">Escalate to</div>
+                          <select
+                            className="select"
+                            value={escalateTo}
+                            onChange={(e) => setEscalateTo(e.target.value as any)}
+                            disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
+                          >
+                            <option value="manager">manager</option>
+                            <option value="admin">admin</option>
+                          </select>
+                        </div>
+
+                        <div className="col">
+                          <div className="label">Assign to userId (optional)</div>
+                          <input
+                            className="input"
+                            value={assignToUserId}
+                            onChange={(e) => setAssignToUserId(e.target.value)}
+                            placeholder="(optional) paste a staff userId"
+                            disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
+                          />
+                        </div>
                       </div>
 
-                      <div className="col">
-                        <div className="label">Assign to userId (optional)</div>
-                        <input
-                          className="input"
-                          value={assignToUserId}
-                          onChange={(e) => setAssignToUserId(e.target.value)}
-                          placeholder="(optional) paste a staff userId"
+                      <div style={{ marginTop: 10 }}>
+                        <div className="label">Reason (optional)</div>
+                        <textarea
+                          className="textarea"
+                          rows={3}
+                          value={reason}
+                          onChange={(e) => setReason(e.target.value)}
+                          placeholder="Short reason for escalation…"
                           disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
                         />
                       </div>
-                    </div>
 
-                    <div style={{ marginTop: 10 }}>
-                      <div className="label">Reason (optional)</div>
-                      <textarea
-                        className="textarea"
-                        rows={3}
-                        value={reason}
-                        onChange={(e) => setReason(e.target.value)}
-                        placeholder="Short reason for escalation…"
-                        disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
-                      />
-                    </div>
-
-                    <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-                      <button
-                        className="btn primary"
-                        onClick={escalate}
-                        disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}
-                      >
-                        {isEscalated ? "Escalated" : escalating ? "Escalating…" : "Escalate"}
-                      </button>
-
-                      {!confirmClose ? (
-                        <button
-                          className="btn danger"
-                          onClick={() => setConfirmClose(true)}
-                          disabled={!canClose || isClosed || isResolved}
-                        >
-                          Close session
+                      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                        <button className="btn primary" onClick={escalate} disabled={!canEscalate || isClosed || isResolved || isEscalated || escalating}>
+                          {isEscalated ? "Escalated" : escalating ? "Escalating…" : "Escalate"}
                         </button>
-                      ) : (
-                        <>
-                          <button
-                            className="btn danger"
-                            onClick={closeSession}
-                            disabled={!canClose || isClosed || isResolved}
-                          >
-                            Confirm close
+
+                        {!confirmClose ? (
+                          <button className="btn danger" onClick={() => setConfirmClose(true)} disabled={!canClose || isClosed || isResolved}>
+                            Close session
                           </button>
-                          <button className="btn" onClick={() => setConfirmClose(false)} disabled={isClosed || isResolved}>
-                            Cancel
-                          </button>
-                        </>
-                      )}
-                    </div>
-
-                    {!canEscalate ? (
-                      <div className="small" style={{ marginTop: 10 }}>
-                        You don’t have permission to escalate this session.
+                        ) : (
+                          <>
+                            <button className="btn danger" onClick={closeSession} disabled={!canClose || isClosed || isResolved}>
+                              Confirm close
+                            </button>
+                            <button className="btn" onClick={() => setConfirmClose(false)} disabled={isClosed || isResolved}>
+                              Cancel
+                            </button>
+                          </>
+                        )}
                       </div>
-                    ) : null}
-
-                    {isEscalated ? (
-                      <div className="small" style={{ marginTop: 10 }}>
-                        This session is already escalated. (Prevents double-escalation.)
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="listItemStatic">
-                    <div className="listTitle">What this does (MVP)</div>
-                    <div className="small" style={{ marginTop: 6 }}>
-                      • Escalation changes visibility/state on the backend.
-                      <br />
-                      • Staff can view only when visibility permits.
-                      <br />
-                      • Sending is owner-only (safe default).
-                      <br />
-                      • Resolve is staff-only (adds a note + marks handled).
-                      <br />
-                      • Closing locks the session.
                     </div>
-                  </div>
+                  ) : null}
+
+                  {!isConfessional ? (
+                    <div className="listItemStatic">
+                      <div className="listTitle">What this does (MVP)</div>
+                      <div className="small" style={{ marginTop: 6 }}>
+                        • Escalation changes visibility/state on the backend.
+                        <br />
+                        • Staff can view only when visibility permits.
+                        <br />
+                        • Sending is owner-only (safe default).
+                        <br />
+                        • Resolve is staff-only (adds a note + marks handled).
+                        <br />
+                        • Closing locks the session.
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
-                <div className="small" style={{ marginTop: 12 }}>
-                  If you want “staff can reply” later, we’ll add a staff message endpoint + audit logs.
-                </div>
+                {!isConfessional ? (
+                  <div className="small" style={{ marginTop: 12 }}>
+                    If you want “staff can reply” later, we’ll add a staff message endpoint + audit logs.
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
