@@ -31,86 +31,106 @@ export default function AuthPage({ mode }: { mode: "login" | "register" }) {
     }
   }
 
+  const title = mode === "register" ? "Start your program" : "Welcome back";
+  const subtitle =
+    mode === "register"
+      ? "Create a space for consistency, accountability, and growth."
+      : "Log in and keep building momentum.";
+
   return (
-    <div className="container">
-      <div className="card">
-        <div className="hdr">
-          <div>
-            <h1>{mode === "register" ? "Start your program" : "Welcome back"}</h1>
-            <div className="sub">
-              {mode === "register"
-                ? "Create a space for consistency, accountability, and growth."
-                : "Log in and keep building momentum."}
+    <div className="authWrap">
+      <div className="authCard">
+        <div className="authGrid">
+          {/* Left / hero */}
+          <div className="authLeft">
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+              <div>
+                <div className="authHeroTitle">{title}</div>
+                <div className="authHeroSub">{subtitle}</div>
+              </div>
+              <span className="badge">{mode === "register" ? "Admin setup" : "Access"}</span>
+            </div>
+
+            <div style={{ marginTop: 16 }} className="small">
+              This app exists to connect organizations and employees empathetically, while giving organizations
+              responsible visibility into patterns that affect wellbeing, retention, and safety — without violating
+              individual dignity.
+            </div>
+
+            <div style={{ marginTop: 14, opacity: 0.9 }} className="small">
+              Tip: Use simple usernames (letters/numbers/dots/underscores). Passwords are hashed + stored securely.
             </div>
           </div>
-          <span className="badge">{mode === "register" ? "Admin setup" : "Access"}</span>
-        </div>
 
-        <div className="body">
-          <form onSubmit={submit} className="row" style={{ alignItems: "flex-end" }}>
-            {mode === "register" && (
-              <div className="col">
-                <div className="label">Program / Organization name</div>
+          {/* Right / form */}
+          <div className="authRight">
+            <form onSubmit={submit} className="authForm">
+              {mode === "register" ? (
+                <div style={{ marginBottom: 12 }}>
+                  <div className="label">Program / Organization name</div>
+                  <input
+                    className="input"
+                    value={orgName}
+                    onChange={(e) => setOrgName(e.target.value)}
+                    placeholder="e.g., Level Up Program"
+                  />
+                </div>
+              ) : null}
+
+              <div style={{ marginBottom: 12 }}>
+                <div className="label">Username</div>
                 <input
                   className="input"
-                  value={orgName}
-                  onChange={(e) => setOrgName(e.target.value)}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="yourname"
                 />
               </div>
-            )}
 
-            <div className="col">
-              <div className="label">Username</div>
-              <input
-                className="input"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-              />
-            </div>
+              <div style={{ marginBottom: 12 }}>
+                <div className="label">Password</div>
+                <input
+                  className="input"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  placeholder="••••••••"
+                />
+              </div>
 
-            <div className="col">
-              <div className="label">Password</div>
-              <input
-                className="input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                type="password"
-              />
-            </div>
+              <div className="authActions">
+                <button className="btn primary" disabled={loading || !username.trim() || !password}>
+                  {loading ? "Working..." : mode === "register" ? "Create space" : "Log in"}
+                </button>
 
-            <div className="col" style={{ flexBasis: 180 }}>
-              <button className="btn primary" disabled={loading || !username.trim() || !password}>
-                {loading ? "Working..." : mode === "register" ? "Create space" : "Log in"}
-              </button>
-            </div>
-          </form>
+                <Link className="btn" to="/">
+                  Home
+                </Link>
+              </div>
 
-          {err && (
-            <div style={{ marginTop: 12 }} className="card body">
-              <div style={{ color: "#fb7185", fontWeight: 700 }}>Error</div>
-              <div className="small">{err}</div>
-            </div>
-          )}
+              {err ? <div className="toast bad" style={{ marginTop: 12 }}>{err}</div> : null}
 
-          <hr />
+              <hr style={{ marginTop: 16 }} />
 
-          <div className="small">
-            {mode === "register" ? (
-              <>
-                Already part of a program? <Link to="/login">Log in</Link>
-              </>
-            ) : (
-              <>
-                New here? <Link to="/register">Create a program</Link>
-              </>
-            )}
-          </div>
+              <div className="small">
+                {mode === "register" ? (
+                  <>
+                    Already part of a program? <Link to="/login">Log in</Link>
+                  </>
+                ) : (
+                  <>
+                    New here? <Link to="/register">Create a program</Link>
+                  </>
+                )}
+              </div>
 
-          <div className="small" style={{ marginTop: 10 }}>
-            Forgot password? <Link to="/reset">Reset it</Link>
+              <div className="small" style={{ marginTop: 10 }}>
+                Forgot password? <Link to="/reset">Reset it</Link>
+              </div>
+            </form>
           </div>
         </div>
       </div>
