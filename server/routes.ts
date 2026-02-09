@@ -1,4 +1,4 @@
-// server/routes.ts (FULL REPLACEMENT — adds Inbox endpoints, keeps everything else)
+// server/routes.ts (FULL REPLACEMENT)
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
@@ -40,15 +40,17 @@ import {
   addOutletMessage,
   escalateOutletSession,
   closeOutletSession,
+
+  // outlet admin helpers
   resolveOutletSession,
   outletAnalyticsSummary,
 
-  // ✅ Inbox (trust loop)
-  createInboxMessage,
+  // ✅ Inbox
   listInboxForUser,
   markInboxRead,
-  ackInbox,
-  listSentInboxMessages,
+  markInboxAck,
+  listStaffInboxMessages,
+  createStaffInboxMessage,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
 
@@ -62,6 +64,9 @@ function wrap(fn: (req: Request, res: Response, next: NextFunction) => Promise<a
   };
 }
 
+/**
+ * Minimal hardening helpers
+ */
 function isExpired(expiresAtIso: string) {
   const t = new Date(expiresAtIso).getTime();
   return !Number.isFinite(t) || t < Date.now();
@@ -114,8 +119,8 @@ async function generateOutletAiReply(params: {
       reply:
         "I’m really glad you said something.\n\n" +
         "If you’re in immediate danger or might act on these thoughts, please call 911 or go to the nearest ER.\n" +
-        "If you’re in the U.S., you can also call or text **988** (Suicide & Crisis Lifeline).\n\n" +
-        "For your workplace: I can help you document what’s going on and we can escalate this to an admin (or HR) right now.\n\n" +
+        "If you’re in the U.S., you can also call or text **988**.\n\n" +
+        "For your workplace: I can help you document what’s going on and we can escalate this to an admin right now.\n\n" +
         "If you can, tell me: are you safe right this moment? (yes/no)",
     };
   }
@@ -127,17 +132,12 @@ async function generateOutletAiReply(params: {
     "that’s it",
     "thats it",
     "nothing else",
-    "no",
     "nope",
     "all good",
     "thanks",
     "thank you",
-    "cool",
     "ok",
     "okay",
-    "got it",
-    "understood",
-    "sounds good",
     "close",
     "end",
     "stop",
@@ -150,14 +150,14 @@ async function generateOutletAiReply(params: {
       reply:
         "Got it. Before we wrap, here are 3 clean options you can pick from:\n\n" +
         "1) **Document it** (quick log you can paste into notes/HR)\n" +
-        "2) **Draft a message** to your manager (calm + clear + outcome-focused)\n" +
+        "2) **Draft a message** to your manager (calm + clear)\n" +
         "3) **Escalate** (if you want this visible to management/admin)\n\n" +
-        "If you want, reply with **1**, **2**, or **3** — or type **close** and I’ll leave this session ready to revisit later.",
+        "Reply with **1**, **2**, or **3** — or type **close**.",
     };
   }
 
   const hasTimeWords = /today|yesterday|last week|this week|shift|schedule|hours|overtime|late|relief/.test(lowered);
-  const hasPayWords = /pay|wage|raise|hours|shorted|missing|tips|commission|bonus|rate/.test(lowered);
+  const hasPayWords = /pay|wage|raise|shorted|missing|tips|commission|bonus|rate/.test(lowered);
   const hasConflictWords = /manager|supervisor|coworker|harass|bully|yell|argument|threat|disrespect/.test(lowered);
   const hasSafetyWords = /unsafe|injury|accident|violence|threat|weapon|assault|stalk/.test(lowered);
   const wantsDraft = /write|draft|text|message|email|say to|script/.test(lowered);
@@ -178,11 +178,10 @@ async function generateOutletAiReply(params: {
         `**Subject:** ${subjectLine}\n\n` +
         `Hi [Manager Name],\n\n` +
         `I wanted to document an issue I experienced: ${msg}\n\n` +
-        `The impact on me is: [brief impact — stress, confusion, workload, safety, etc.].\n\n` +
-        `A reasonable outcome I’m requesting is: [specific ask — clarification, schedule adjustment, pay correction, mediation, etc.].\n\n` +
+        `The impact on me is: [brief impact].\n\n` +
+        `A reasonable outcome I’m requesting is: [specific ask].\n\n` +
         `Can we align on next steps by [date/time]?\n\n` +
-        `Thank you,\n[Your Name]\n\n` +
-        `If you want, tell me: **who is this going to** (manager/HR/admin) and **what outcome you want** in one sentence, and I’ll tighten it.`,
+        `Thank you,\n[Your Name]\n`,
     };
   }
 
@@ -191,20 +190,19 @@ async function generateOutletAiReply(params: {
       riskLevel: 0,
       reply:
         "Understood. We can escalate this in a controlled way.\n\n" +
-        "Two questions so we do it right:\n" +
+        "Two questions:\n" +
         "1) Who should see it? **manager** or **admin**\n" +
-        "2) What’s the goal: **support**, **investigation**, or **immediate action**?\n\n" +
-        "Reply like: `manager + support` or `admin + immediate action`.",
+        "2) Goal: **support**, **investigation**, or **immediate action**?\n\n" +
+        "Reply like: `manager + support`",
     };
   }
 
   const looksLikeVague = msg.length < 40 && !hasTimeWords && !hasPayWords && !hasConflictWords && !hasSafetyWords;
-
   if (looksLikeVague) {
     return {
       riskLevel: 0,
       reply:
-        "I hear you. Help me aim this right with one detail:\n\n" +
+        "I hear you. One detail so I aim correctly:\n\n" +
         "What’s the **main category** — *schedule*, *pay*, *conflict*, *performance pressure*, or *other*?\n\n" +
         "Reply with one word (or a short phrase).",
     };
@@ -215,8 +213,7 @@ async function generateOutletAiReply(params: {
     reply:
       "Thank you — that’s clear.\n\n" +
       "What would a **reasonable outcome** look like for you?\n" +
-      "Examples: schedule change, clear expectations, pay correction, mediation, written policy, time off, boundaries.\n\n" +
-      "Reply with the outcome you want in one sentence, and I’ll help you choose the best next step.",
+      "Reply with the outcome you want in one sentence.",
   };
 }
 
@@ -273,17 +270,9 @@ const OutletResolveSchema = z.object({
   resolutionNote: z.string().max(2000).optional().nullable(),
 });
 
-/** ✅ Inbox schemas (Trust Loop) */
-const InboxCreateSchema = z.object({
-  title: z.string().min(1).max(120),
-  body: z.string().min(1).max(6000),
-  severity: z.enum(["info", "warning", "critical"]).default("info"),
-  tags: z.array(z.string().max(24)).max(20).optional(),
-  requiresAck: z.boolean().optional().default(false),
-
-  // targeting:
-  audienceRole: z.enum(["all", "user", "manager", "admin"]).optional().default("all"),
-  audienceUserId: z.string().min(3).optional().nullable(),
+/** Inbox schemas */
+const InboxListSchema = z.object({
+  limit: z.string().optional(),
 });
 
 async function staffCanAccessOutletSession(auth: any, sessionId: string): Promise<boolean> {
@@ -430,112 +419,7 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // ✅ Inbox (Trust Loop)
-  // -----------------------------
-  // User: list inbox
-  app.get(
-    "/api/inbox",
-    requireAuth,
-    wrap(async (req, res) => {
-      const schema = z.object({ limit: z.string().optional() });
-      const parsed = schema.safeParse(req.query);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
-      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
-
-      const items = await listInboxForUser({ orgId: auth.orgId, userId: auth.userId, limit });
-      return res.json({ items });
-    }),
-  );
-
-  // User: mark read
-  app.post(
-    "/api/inbox/:id/read",
-    requireAuth,
-    wrap(async (req, res) => {
-      const messageId = String(req.params.id || "");
-      const auth = (req as any).auth!;
-      const ok = await markInboxRead({ orgId: auth.orgId, userId: auth.userId, messageId });
-      return res.json({ ok: !!ok });
-    }),
-  );
-
-  // User: acknowledge
-  app.post(
-    "/api/inbox/:id/ack",
-    requireAuth,
-    wrap(async (req, res) => {
-      const messageId = String(req.params.id || "");
-      const auth = (req as any).auth!;
-      const ok = await ackInbox({ orgId: auth.orgId, userId: auth.userId, messageId });
-      return res.json({ ok: !!ok });
-    }),
-  );
-
-  // Staff: create inbox message (admin/manager)
-  app.post(
-    "/api/staff/inbox/messages",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const parsed = InboxCreateSchema.safeParse(req.body || {});
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-
-      // HARDEN: if targeting a userId, it must belong to org
-      const targetUserId = parsed.data.audienceUserId ?? null;
-      if (targetUserId) {
-        const target = await assertUserInOrgOr404(auth.orgId, targetUserId, res);
-        if (!target) return;
-      }
-
-      const msg = await createInboxMessage({
-        orgId: auth.orgId,
-        createdBy: auth.userId,
-        title: parsed.data.title,
-        body: parsed.data.body,
-        severity: parsed.data.severity,
-        tags: parsed.data.tags ?? [],
-        requiresAck: !!parsed.data.requiresAck,
-        audienceRole: parsed.data.audienceRole,
-        audienceUserId: targetUserId,
-      });
-
-      return res.json({ message: msg });
-    }),
-  );
-
-  // Staff: list sent messages + read/ack totals
-  app.get(
-    "/api/staff/inbox/messages",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const schema = z.object({
-        limit: z.string().optional(),
-        sinceDays: z.string().optional(),
-      });
-      const parsed = schema.safeParse(req.query);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
-      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
-
-      const sinceDaysRaw = parsed.data.sinceDays ? Number(parsed.data.sinceDays) : 30;
-      const sinceDays = Number.isFinite(sinceDaysRaw) ? Math.max(1, Math.min(sinceDaysRaw, 365)) : 30;
-      const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
-
-      const sent = await listSentInboxMessages({ orgId: auth.orgId, limit, sinceIso });
-      return res.json({ sent, sinceDays });
-    }),
-  );
-
-  // -----------------------------
-  // Invites + Password reset (unchanged from your current)
+  // Invites
   // -----------------------------
   app.post(
     "/api/admin/invites",
@@ -586,10 +470,7 @@ export function registerRoutes(app: Express) {
       const org = await getOrg(invite.orgId);
       if (!org) return res.status(404).json({ error: "Org not found" });
 
-      const schema = z.object({
-        username: UsernameSchema,
-        password: PasswordSchema,
-      });
+      const schema = z.object({ username: UsernameSchema, password: PasswordSchema });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -614,6 +495,9 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
+  // Password resets
+  // -----------------------------
   app.post(
     "/api/auth/request-reset",
     wrap(async (req, res) => {
@@ -784,7 +668,102 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // Outlet / Grievance Office
+  // ✅ Inbox (User)
+  // -----------------------------
+  app.get(
+    "/api/inbox",
+    requireAuth,
+    wrap(async (req, res) => {
+      const parsed = InboxListSchema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 300)) : 100;
+
+      const items = await listInboxForUser({ orgId: auth.orgId, userId: auth.userId, limit });
+      return res.json({ items });
+    }),
+  );
+
+  app.post(
+    "/api/inbox/:id/read",
+    requireAuth,
+    wrap(async (req, res) => {
+      const id = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await markInboxRead({ orgId: auth.orgId, userId: auth.userId, itemId: id });
+      return res.json({ ok: !!ok });
+    }),
+  );
+
+  app.post(
+    "/api/inbox/:id/ack",
+    requireAuth,
+    wrap(async (req, res) => {
+      const id = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await markInboxAck({ orgId: auth.orgId, userId: auth.userId, itemId: id });
+      return res.json({ ok: !!ok });
+    }),
+  );
+
+  // -----------------------------
+  // ✅ Inbox (Staff)
+  // -----------------------------
+  app.get(
+    "/api/staff/inbox/messages",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        userId: z.string().min(3),
+        limit: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
+      if (!target) return;
+
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 200;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
+
+      const messages = await listStaffInboxMessages({ orgId: auth.orgId, userId: parsed.data.userId, limit });
+      return res.json({ messages });
+    }),
+  );
+
+  app.post(
+    "/api/staff/inbox/messages",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        userId: z.string().min(3),
+        content: z.string().min(1).max(4000),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
+      if (!target) return;
+
+      const msg = await createStaffInboxMessage({
+        orgId: auth.orgId,
+        userId: parsed.data.userId,
+        staffUserId: auth.userId,
+        content: parsed.data.content,
+      });
+
+      return res.json({ message: msg });
+    }),
+  );
+
+  // -----------------------------
+  // Outlet / Grievance Office ✅
   // -----------------------------
   app.post(
     "/api/outlet/sessions",
@@ -866,6 +845,7 @@ export function registerRoutes(app: Express) {
       const auth = (req as any).auth!;
       const session = await getOutletSession({ orgId: auth.orgId, sessionId });
       if (!session) return res.status(404).json({ error: "Session not found" });
+
       if (session.userId !== auth.userId) return res.status(403).json({ error: "Forbidden" });
 
       const userMsg = await addOutletMessage({
@@ -994,7 +974,7 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // Exports (CSV): ADMIN ONLY
+  // Exports (CSV): ADMIN ONLY ✅
   // -----------------------------
   app.get(
     "/api/export/checkins.csv",
@@ -1196,7 +1176,7 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Last: JSON error response
+  // Last: JSON error response (keeps pilot UX clean)
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error("API error:", err);
     const msg = typeof err?.message === "string" ? err.message : "Server error";
