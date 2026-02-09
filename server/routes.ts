@@ -1,4 +1,4 @@
-// server/routes.ts (FULL REPLACEMENT — adds "kind" + fixes resolved + blocks staff access to confessional)
+// server/routes.ts (FULL REPLACEMENT — adds Inbox endpoints, keeps everything else)
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
@@ -40,15 +40,21 @@ import {
   addOutletMessage,
   escalateOutletSession,
   closeOutletSession,
-
-  // Admin helpers
   resolveOutletSession,
   outletAnalyticsSummary,
+
+  // ✅ Inbox (trust loop)
+  createInboxMessage,
+  listInboxForUser,
+  markInboxRead,
+  ackInbox,
+  listSentInboxMessages,
 } from "./storage.js";
 import { requireAuth, requireRole, signToken, verifyPassword } from "./auth.js";
 
 /**
  * Async route wrapper: prevents unhandled promise rejections
+ * and ensures Express receives errors via next(err).
  */
 function wrap(fn: (req: Request, res: Response, next: NextFunction) => Promise<any> | any) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -71,13 +77,13 @@ async function assertUserInOrgOr404(orgId: string, userId: string, res: Response
 }
 
 /**
- * Stub AI reply (loop-safe)
+ * NOTE: AI is stubbed here on purpose.
+ * Phase 2 goal is to wire the workflow without forcing OpenAI integration yet.
  */
 async function generateOutletAiReply(params: {
   userMessage: string;
   category?: string | null;
   visibility?: string;
-  kind?: string;
 }): Promise<{ reply: string; riskLevel: number }> {
   const raw = params.userMessage ?? "";
   const msg = raw.trim();
@@ -138,19 +144,15 @@ async function generateOutletAiReply(params: {
   ];
   const looksLikeClosure = donePhrases.some((p) => lowered === p || lowered.includes(p)) || msg.length <= 2;
 
-  // Confessional tone: softer, no “escalate pitch” unless user asks
-  const isConfessional = String(params.kind || "").toLowerCase() === "confessional";
-
   if (looksLikeClosure) {
     return {
       riskLevel: 0,
-      reply: isConfessional
-        ? "Got it. I’m here anytime you want to write more. If you want, tell me one thing you’d like to feel *tomorrow* — calmer, clearer, more confident, etc."
-        : "Got it. Before we wrap, here are 3 clean options you can pick from:\n\n" +
-          "1) **Document it** (quick log you can paste into notes/HR)\n" +
-          "2) **Draft a message** to your manager (calm + clear + outcome-focused)\n" +
-          "3) **Escalate** (if you want this visible to management/admin)\n\n" +
-          "Reply with **1**, **2**, or **3** — or type **close**.",
+      reply:
+        "Got it. Before we wrap, here are 3 clean options you can pick from:\n\n" +
+        "1) **Document it** (quick log you can paste into notes/HR)\n" +
+        "2) **Draft a message** to your manager (calm + clear + outcome-focused)\n" +
+        "3) **Escalate** (if you want this visible to management/admin)\n\n" +
+        "If you want, reply with **1**, **2**, or **3** — or type **close** and I’ll leave this session ready to revisit later.",
     };
   }
 
@@ -161,7 +163,7 @@ async function generateOutletAiReply(params: {
   const wantsDraft = /write|draft|text|message|email|say to|script/.test(lowered);
   const wantsEscalation = /escalate|hr|report|complaint|union|lawyer|legal/.test(lowered);
 
-  if (!isConfessional && wantsDraft) {
+  if (wantsDraft) {
     const subjectLine = hasPayWords
       ? "Pay clarification"
       : hasTimeWords
@@ -176,22 +178,22 @@ async function generateOutletAiReply(params: {
         `**Subject:** ${subjectLine}\n\n` +
         `Hi [Manager Name],\n\n` +
         `I wanted to document an issue I experienced: ${msg}\n\n` +
-        `The impact on me is: [brief impact].\n\n` +
-        `A reasonable outcome I’m requesting is: [specific ask].\n\n` +
+        `The impact on me is: [brief impact — stress, confusion, workload, safety, etc.].\n\n` +
+        `A reasonable outcome I’m requesting is: [specific ask — clarification, schedule adjustment, pay correction, mediation, etc.].\n\n` +
         `Can we align on next steps by [date/time]?\n\n` +
         `Thank you,\n[Your Name]\n\n` +
-        `Tell me who this is going to (manager/HR/admin) and your desired outcome, and I’ll tighten it.`,
+        `If you want, tell me: **who is this going to** (manager/HR/admin) and **what outcome you want** in one sentence, and I’ll tighten it.`,
     };
   }
 
-  if (!isConfessional && (wantsEscalation || hasSafetyWords)) {
+  if (wantsEscalation || hasSafetyWords) {
     return {
       riskLevel: 0,
       reply:
         "Understood. We can escalate this in a controlled way.\n\n" +
-        "Two questions:\n" +
+        "Two questions so we do it right:\n" +
         "1) Who should see it? **manager** or **admin**\n" +
-        "2) Goal: **support**, **investigation**, or **immediate action**?\n\n" +
+        "2) What’s the goal: **support**, **investigation**, or **immediate action**?\n\n" +
         "Reply like: `manager + support` or `admin + immediate action`.",
     };
   }
@@ -201,17 +203,20 @@ async function generateOutletAiReply(params: {
   if (looksLikeVague) {
     return {
       riskLevel: 0,
-      reply: isConfessional
-        ? "I hear you. Give me one detail: is this mostly about **stress**, **relationships**, **money**, **work**, or **self-confidence**?"
-        : "I hear you. What’s the main category — *schedule*, *pay*, *conflict*, *performance pressure*, or *other*?\n\nReply with one word.",
+      reply:
+        "I hear you. Help me aim this right with one detail:\n\n" +
+        "What’s the **main category** — *schedule*, *pay*, *conflict*, *performance pressure*, or *other*?\n\n" +
+        "Reply with one word (or a short phrase).",
     };
   }
 
   return {
     riskLevel: 0,
-    reply: isConfessional
-      ? "Thank you for sharing that. If you had to name the *core feeling* underneath it (anger, fear, sadness, shame, overwhelm), what is it?"
-      : "Thank you — that’s clear.\n\nWhat would a reasonable outcome look like for you? Reply in one sentence.",
+    reply:
+      "Thank you — that’s clear.\n\n" +
+      "What would a **reasonable outcome** look like for you?\n" +
+      "Examples: schedule change, clear expectations, pay correction, mediation, written policy, time off, boundaries.\n\n" +
+      "Reply with the outcome you want in one sentence, and I’ll help you choose the best next step.",
   };
 }
 
@@ -220,6 +225,7 @@ const UsernameSchema = z
   .min(3)
   .max(40)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username can only contain letters, numbers, dot, underscore, hyphen");
+
 const PasswordSchema = z.string().min(6).max(200);
 
 const RegisterSchema = z.object({
@@ -227,6 +233,7 @@ const RegisterSchema = z.object({
   username: UsernameSchema,
   password: PasswordSchema,
 });
+
 const LoginSchema = z.object({
   username: UsernameSchema,
   password: PasswordSchema,
@@ -248,17 +255,36 @@ const HabitSchema = z.object({
 
 /** Outlet schemas */
 const OutletCreateSchema = z.object({
-  kind: z.enum(["outlet", "confessional"]).default("outlet"), // ✅ Option B
   category: z.string().max(80).optional().nullable(),
   visibility: z.enum(["private", "manager", "admin"]).default("private"),
 });
-const OutletMessageSchema = z.object({ content: z.string().min(1).max(4000) });
+
+const OutletMessageSchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+
 const OutletEscalateSchema = z.object({
   escalatedToRole: z.enum(["manager", "admin"]),
   assignedToUserId: z.string().min(3).optional().nullable(),
   reason: z.string().max(500).optional().nullable(),
 });
-const OutletResolveSchema = z.object({ resolutionNote: z.string().max(2000).optional().nullable() });
+
+const OutletResolveSchema = z.object({
+  resolutionNote: z.string().max(2000).optional().nullable(),
+});
+
+/** ✅ Inbox schemas (Trust Loop) */
+const InboxCreateSchema = z.object({
+  title: z.string().min(1).max(120),
+  body: z.string().min(1).max(6000),
+  severity: z.enum(["info", "warning", "critical"]).default("info"),
+  tags: z.array(z.string().max(24)).max(20).optional(),
+  requiresAck: z.boolean().optional().default(false),
+
+  // targeting:
+  audienceRole: z.enum(["all", "user", "manager", "admin"]).optional().default("all"),
+  audienceUserId: z.string().min(3).optional().nullable(),
+});
 
 async function staffCanAccessOutletSession(auth: any, sessionId: string): Promise<boolean> {
   const role = auth?.role;
@@ -277,7 +303,9 @@ async function staffCanAccessOutletSession(auth: any, sessionId: string): Promis
 export function registerRoutes(app: Express) {
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+  // -----------------------------
   // Auth
+  // -----------------------------
   app.post(
     "/api/auth/register",
     wrap(async (req, res) => {
@@ -294,7 +322,11 @@ export function registerRoutes(app: Express) {
       const user = await createUser({ username, password, orgId: org.id, role: "admin" });
 
       const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
-      return res.json({ token, user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role }, org });
+      return res.json({
+        token,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
     }),
   );
 
@@ -315,14 +347,24 @@ export function registerRoutes(app: Express) {
       if (!org) return res.status(401).json({ error: "Account org not found" });
 
       const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-      return res.json({ token, user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role }, org });
+      return res.json({
+        token,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
     }),
   );
 
+  // -----------------------------
   // Me
-  app.get("/api/me", requireAuth, (req, res) => res.json({ auth: (req as any).auth }));
+  // -----------------------------
+  app.get("/api/me", requireAuth, (req, res) => {
+    return res.json({ auth: (req as any).auth });
+  });
 
+  // -----------------------------
   // Org + Users
+  // -----------------------------
   app.get(
     "/api/org",
     requireAuth,
@@ -387,6 +429,114 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
+  // ✅ Inbox (Trust Loop)
+  // -----------------------------
+  // User: list inbox
+  app.get(
+    "/api/inbox",
+    requireAuth,
+    wrap(async (req, res) => {
+      const schema = z.object({ limit: z.string().optional() });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
+
+      const items = await listInboxForUser({ orgId: auth.orgId, userId: auth.userId, limit });
+      return res.json({ items });
+    }),
+  );
+
+  // User: mark read
+  app.post(
+    "/api/inbox/:id/read",
+    requireAuth,
+    wrap(async (req, res) => {
+      const messageId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await markInboxRead({ orgId: auth.orgId, userId: auth.userId, messageId });
+      return res.json({ ok: !!ok });
+    }),
+  );
+
+  // User: acknowledge
+  app.post(
+    "/api/inbox/:id/ack",
+    requireAuth,
+    wrap(async (req, res) => {
+      const messageId = String(req.params.id || "");
+      const auth = (req as any).auth!;
+      const ok = await ackInbox({ orgId: auth.orgId, userId: auth.userId, messageId });
+      return res.json({ ok: !!ok });
+    }),
+  );
+
+  // Staff: create inbox message (admin/manager)
+  app.post(
+    "/api/staff/inbox/messages",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const parsed = InboxCreateSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+
+      // HARDEN: if targeting a userId, it must belong to org
+      const targetUserId = parsed.data.audienceUserId ?? null;
+      if (targetUserId) {
+        const target = await assertUserInOrgOr404(auth.orgId, targetUserId, res);
+        if (!target) return;
+      }
+
+      const msg = await createInboxMessage({
+        orgId: auth.orgId,
+        createdBy: auth.userId,
+        title: parsed.data.title,
+        body: parsed.data.body,
+        severity: parsed.data.severity,
+        tags: parsed.data.tags ?? [],
+        requiresAck: !!parsed.data.requiresAck,
+        audienceRole: parsed.data.audienceRole,
+        audienceUserId: targetUserId,
+      });
+
+      return res.json({ message: msg });
+    }),
+  );
+
+  // Staff: list sent messages + read/ack totals
+  app.get(
+    "/api/staff/inbox/messages",
+    requireAuth,
+    requireRole(["admin", "manager"]),
+    wrap(async (req, res) => {
+      const schema = z.object({
+        limit: z.string().optional(),
+        sinceDays: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.query);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+      const auth = (req as any).auth!;
+      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
+
+      const sinceDaysRaw = parsed.data.sinceDays ? Number(parsed.data.sinceDays) : 30;
+      const sinceDays = Number.isFinite(sinceDaysRaw) ? Math.max(1, Math.min(sinceDaysRaw, 365)) : 30;
+      const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+
+      const sent = await listSentInboxMessages({ orgId: auth.orgId, limit, sinceIso });
+      return res.json({ sent, sinceDays });
+    }),
+  );
+
+  // -----------------------------
+  // Invites + Password reset (unchanged from your current)
+  // -----------------------------
   app.post(
     "/api/admin/invites",
     requireAuth,
@@ -436,7 +586,10 @@ export function registerRoutes(app: Express) {
       const org = await getOrg(invite.orgId);
       if (!org) return res.status(404).json({ error: "Org not found" });
 
-      const schema = z.object({ username: UsernameSchema, password: PasswordSchema });
+      const schema = z.object({
+        username: UsernameSchema,
+        password: PasswordSchema,
+      });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -453,11 +606,14 @@ export function registerRoutes(app: Express) {
       await deleteInvite(token);
 
       const jwt = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
-      return res.json({ token: jwt, user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role }, org });
+      return res.json({
+        token: jwt,
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+        org,
+      });
     }),
   );
 
-  // Password reset (demo)
   app.post(
     "/api/auth/request-reset",
     wrap(async (req, res) => {
@@ -507,12 +663,19 @@ export function registerRoutes(app: Express) {
       if (!target) return;
 
       const expiresAt = new Date(Date.now() + parsed.data.expiresInMinutes * 60 * 1000).toISOString();
-      const reset = await createPasswordReset({ orgId: auth.orgId, userId, expiresAt, createdBy: auth.userId });
+      const reset = await createPasswordReset({
+        orgId: auth.orgId,
+        userId,
+        expiresAt,
+        createdBy: auth.userId,
+      });
       return res.json({ reset: { token: reset.token, expiresAt: reset.expiresAt } });
     }),
   );
 
+  // -----------------------------
   // Profiles
+  // -----------------------------
   app.get(
     "/api/users/:id/profile",
     requireAuth,
@@ -569,7 +732,9 @@ export function registerRoutes(app: Express) {
     }),
   );
 
-  // Notes
+  // -----------------------------
+  // Notes (staff only)
+  // -----------------------------
   app.get(
     "/api/users/:id/notes",
     requireAuth,
@@ -577,6 +742,7 @@ export function registerRoutes(app: Express) {
     wrap(async (req, res) => {
       const userId = String(req.params.id || "");
       const auth = (req as any).auth!;
+
       const target = await assertUserInOrgOr404(auth.orgId, userId, res);
       if (!target) return;
 
@@ -599,6 +765,7 @@ export function registerRoutes(app: Express) {
     wrap(async (req, res) => {
       const userId = String(req.params.id || "");
       const auth = (req as any).auth!;
+
       const target = await assertUserInOrgOr404(auth.orgId, userId, res);
       if (!target) return;
 
@@ -606,12 +773,19 @@ export function registerRoutes(app: Express) {
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      const n = await addUserNote({ orgId: auth.orgId, userId, authorId: auth.userId, note: parsed.data.note });
+      const n = await addUserNote({
+        orgId: auth.orgId,
+        userId,
+        authorId: auth.userId,
+        note: parsed.data.note,
+      });
       return res.json({ note: n });
     }),
   );
 
-  // Outlet / Counselor’s Office
+  // -----------------------------
+  // Outlet / Grievance Office
+  // -----------------------------
   app.post(
     "/api/outlet/sessions",
     requireAuth,
@@ -623,7 +797,6 @@ export function registerRoutes(app: Express) {
       const session = await createOutletSession({
         orgId: auth.orgId,
         userId: auth.userId,
-        kind: parsed.data.kind,
         category: parsed.data.category ?? null,
         visibility: parsed.data.visibility,
         riskLevel: 0,
@@ -672,10 +845,6 @@ export function registerRoutes(app: Express) {
       if (!session) return res.status(404).json({ error: "Session not found" });
 
       const isOwner = session.userId === auth.userId;
-
-      // ✅ confessional sessions are owner-only
-      if (session.kind === "confessional" && !isOwner) return res.status(403).json({ error: "Forbidden" });
-
       if (!isOwner) {
         const allowed = await staffCanAccessOutletSession(auth, sessionId);
         if (!allowed) return res.status(403).json({ error: "Forbidden" });
@@ -697,22 +866,29 @@ export function registerRoutes(app: Express) {
       const auth = (req as any).auth!;
       const session = await getOutletSession({ orgId: auth.orgId, sessionId });
       if (!session) return res.status(404).json({ error: "Session not found" });
-
       if (session.userId !== auth.userId) return res.status(403).json({ error: "Forbidden" });
 
-      const userMsg = await addOutletMessage({ orgId: auth.orgId, sessionId, sender: "user", content: parsed.data.content });
+      const userMsg = await addOutletMessage({
+        orgId: auth.orgId,
+        sessionId,
+        sender: "user",
+        content: parsed.data.content,
+      });
 
       const ai = await generateOutletAiReply({
         userMessage: parsed.data.content,
         category: session.category ?? null,
         visibility: session.visibility,
-        kind: session.kind,
       });
 
-      const aiMsg = await addOutletMessage({ orgId: auth.orgId, sessionId, sender: "ai", content: ai.reply });
+      const aiMsg = await addOutletMessage({
+        orgId: auth.orgId,
+        sessionId,
+        sender: "ai",
+        content: ai.reply,
+      });
 
-      // ✅ Only auto-escalate real outlet sessions (not confessional)
-      if (ai.riskLevel >= 2 && session.kind !== "confessional") {
+      if (ai.riskLevel >= 2) {
         await escalateOutletSession({
           orgId: auth.orgId,
           sessionId,
@@ -737,8 +913,6 @@ export function registerRoutes(app: Express) {
       const auth = (req as any).auth!;
       const session = await getOutletSession({ orgId: auth.orgId, sessionId });
       if (!session) return res.status(404).json({ error: "Session not found" });
-
-      if (session.kind === "confessional") return res.status(400).json({ error: "Confessional sessions cannot be escalated" });
 
       const isOwner = session.userId === auth.userId;
       const isStaff = auth.role === "admin" || auth.role === "manager";
@@ -767,7 +941,7 @@ export function registerRoutes(app: Express) {
       if (!session) return res.status(404).json({ error: "Session not found" });
 
       const isOwner = session.userId === auth.userId;
-      const isStaffAllowed = session.kind === "outlet" ? await staffCanAccessOutletSession(auth, sessionId) : false;
+      const isStaffAllowed = await staffCanAccessOutletSession(auth, sessionId);
       if (!isOwner && !isStaffAllowed) return res.status(403).json({ error: "Forbidden" });
 
       const ok = await closeOutletSession({ orgId: auth.orgId, sessionId });
@@ -787,8 +961,6 @@ export function registerRoutes(app: Express) {
       const auth = (req as any).auth!;
       const session = await getOutletSession({ orgId: auth.orgId, sessionId });
       if (!session) return res.status(404).json({ error: "Session not found" });
-
-      if (session.kind === "confessional") return res.status(400).json({ error: "Confessional sessions cannot be resolved" });
 
       const allowed = await staffCanAccessOutletSession(auth, sessionId);
       if (!allowed) return res.status(403).json({ error: "Forbidden" });
@@ -821,17 +993,23 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
   // Exports (CSV): ADMIN ONLY
+  // -----------------------------
   app.get(
     "/api/export/checkins.csv",
     requireAuth,
     requireRole(["admin"]),
     wrap(async (req, res) => {
-      const schema = z.object({ userId: z.string().optional(), sinceDays: z.string().optional() });
+      const schema = z.object({
+        userId: z.string().optional(),
+        sinceDays: z.string().optional(),
+      });
       const parsed = schema.safeParse(req.query);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const auth = (req as any).auth!;
+
       if (parsed.data.userId) {
         const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
         if (!target) return;
@@ -844,7 +1022,11 @@ export function registerRoutes(app: Express) {
         sinceDayKey = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       }
 
-      const csv = await exportCheckinsCsv({ orgId: auth.orgId, userId: parsed.data.userId, sinceDayKey });
+      const csv = await exportCheckinsCsv({
+        orgId: auth.orgId,
+        userId: parsed.data.userId,
+        sinceDayKey,
+      });
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader("Content-Disposition", 'attachment; filename="checkins.csv"');
       return res.send(csv);
@@ -863,7 +1045,9 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
   // Check-ins
+  // -----------------------------
   app.post(
     "/api/checkins",
     requireAuth,
@@ -902,7 +1086,12 @@ export function registerRoutes(app: Express) {
       const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 200;
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
 
-      const checkins = await listCheckIns({ orgId: auth.orgId, userId: auth.userId, dayKey: parsed.data.dayKey, limit });
+      const checkins = await listCheckIns({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        dayKey: parsed.data.dayKey,
+        limit,
+      });
       return res.json({ checkins });
     }),
   );
@@ -918,7 +1107,9 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
   // Habits
+  // -----------------------------
   app.post(
     "/api/habits",
     requireAuth,
@@ -927,7 +1118,13 @@ export function registerRoutes(app: Express) {
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const auth = (req as any).auth!;
-      const habit = await createHabit({ orgId: auth.orgId, userId: auth.userId, name: parsed.data.name, targetPerWeek: parsed.data.targetPerWeek });
+      const habit = await createHabit({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        name: parsed.data.name,
+        targetPerWeek: parsed.data.targetPerWeek,
+      });
+
       return res.json({ habit });
     }),
   );
@@ -941,7 +1138,12 @@ export function registerRoutes(app: Express) {
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const auth = (req as any).auth!;
-      const habits = await listHabits({ orgId: auth.orgId, userId: auth.userId, includeArchived: parsed.data.includeArchived === "1" });
+      const habits = await listHabits({
+        orgId: auth.orgId,
+        userId: auth.userId,
+        includeArchived: parsed.data.includeArchived === "1",
+      });
+
       return res.json({ habits });
     }),
   );
@@ -957,7 +1159,9 @@ export function registerRoutes(app: Express) {
     }),
   );
 
+  // -----------------------------
   // Analytics
+  // -----------------------------
   app.get(
     "/api/analytics/org-summary",
     requireAuth,
