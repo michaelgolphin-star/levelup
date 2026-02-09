@@ -7,7 +7,6 @@ import LandingPage from "./LandingPage";
 import AuthPage from "./AuthPage";
 import DashboardPage from "./DashboardPage";
 import InviteAcceptPage from "./InviteAcceptPage";
-import OutletInboxPage from "./OutletInboxPage";
 import { OutletHomePage, OutletSessionPage } from "./OutletPage";
 import ResetPage from "./ResetPage";
 import TrustPage from "./TrustPage";
@@ -28,9 +27,6 @@ export default function App() {
         {/* Counselor’s Office */}
         <Route path="/outlet" element={<OutletHomePage />} />
         <Route path="/outlet/:id" element={<OutletSessionPage />} />
-
-        {/* Optional inbox page if you still use it elsewhere */}
-        <Route path="/outlet-inbox" element={<OutletInboxPage />} />
 
         {/* Password reset */}
         <Route path="/reset" element={<ResetPage />} />
