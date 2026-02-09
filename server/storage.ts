@@ -1,4 +1,7 @@
-// server/storage.ts (FULL REPLACEMENT — adds Inbox w/ read+ack audit trail, keeps existing Outlet + Confessional)
+// server/storage.ts (FULL REPLACEMENT)
+// Includes: org/users/checkins/habits/invites/resets/profiles/notes/outlet + analytics + exports
+// PLUS: Inbox (items) + staff messaging thread
+
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
 import { hashPassword } from "./auth.js";
@@ -21,8 +24,7 @@ if (!DATABASE_URL) {
 // - if PGSSLMODE=require OR URL includes sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
-  DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -117,32 +119,40 @@ function normalizeSender(v: any): OutletSender {
   return "user";
 }
 
-/** Inbox */
-export type InboxAudienceRole = "all" | "user" | "manager" | "admin";
-export type InboxSeverity = "info" | "warning" | "critical";
-export type InboxReceiptStatus = "unread" | "read" | "acked";
+/** ✅ Inbox */
+export type InboxItemType =
+  | "staff_message"
+  | "system"
+  | "outlet_escalation"
+  | "outlet_update"
+  | "checkin_flag"
+  | "note";
 
-function normalizeAudienceRole(v: any): InboxAudienceRole {
-  const s = String(v || "").toLowerCase();
-  if (s === "user") return "user";
-  if (s === "manager") return "manager";
-  if (s === "admin") return "admin";
-  return "all";
-}
+export type InboxItem = {
+  id: string;
+  orgId: string;
+  userId: string; // recipient
+  type: InboxItemType;
+  title: string;
+  body: string;
+  severity: number; // 0..3
+  createdAt: string;
+  readAt: string | null;
+  ackAt: string | null;
+  // convenience for UI
+  isRead: boolean;
+  isAcked: boolean;
+};
 
-function normalizeSeverity(v: any): InboxSeverity {
-  const s = String(v || "").toLowerCase();
-  if (s === "warning") return "warning";
-  if (s === "critical") return "critical";
-  return "info";
-}
-
-function normalizeReceiptStatus(v: any): InboxReceiptStatus {
-  const s = String(v || "").toLowerCase();
-  if (s === "read") return "read";
-  if (s === "acked") return "acked";
-  return "unread";
-}
+export type StaffInboxMessage = {
+  id: string;
+  orgId: string;
+  userId: string; // employee
+  staffUserId: string; // admin/manager sender
+  staffUsername?: string | null; // optional enrichment
+  content: string;
+  createdAt: string;
+};
 
 /**
  * ensureDb()
@@ -236,16 +246,6 @@ export async function ensureDb() {
       note TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
-    // ✅ Confessional (private journal) — separate table
-    `
-    CREATE TABLE IF NOT EXISTS confessional_entries (
-      id TEXT PRIMARY KEY,
-      org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      content TEXT NOT NULL,
-      tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-      created_at TEXT NOT NULL
-    )`,
     `
     CREATE TABLE IF NOT EXISTS outlet_sessions (
       id TEXT PRIMARY KEY,
@@ -283,43 +283,35 @@ export async function ensureDb() {
       reason TEXT,
       created_at TEXT NOT NULL
     )`,
-    // ✅ NEW: Inbox messages + receipts (audit trail)
+
+    // ✅ Inbox items (user-facing list)
     `
-    CREATE TABLE IF NOT EXISTS inbox_messages (
+    CREATE TABLE IF NOT EXISTS inbox_items (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
-      audience_role TEXT NOT NULL DEFAULT 'all',      -- all|user|manager|admin
-      audience_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,  -- optional direct targeting
-
-      severity TEXT NOT NULL DEFAULT 'info',          -- info|warning|critical
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- recipient
+      type TEXT NOT NULL,
       title TEXT NOT NULL,
       body TEXT NOT NULL,
-      tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-      requires_ack BOOLEAN NOT NULL DEFAULT false,
-
-      created_at TEXT NOT NULL
+      severity INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      read_at TEXT,
+      ack_at TEXT
     )`,
+
+    // ✅ Staff thread messages (manager/admin → employee)
     `
-    CREATE TABLE IF NOT EXISTS inbox_receipts (
+    CREATE TABLE IF NOT EXISTS inbox_staff_messages (
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-      message_id TEXT NOT NULL REFERENCES inbox_messages(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
-      status TEXT NOT NULL DEFAULT 'unread',          -- unread|read|acked
-      read_at TEXT,
-      ack_at TEXT,
-
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-
-      UNIQUE (message_id, user_id)
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- employee
+      staff_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- sender (staff)
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
     )`,
   ]);
 
-  // 2) Migration safety: add missing columns (existing installs)
+  // 2) Migration safety: add missing columns (each statement separately)
   await execMany([
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT`,
@@ -333,15 +325,22 @@ export async function ensureDb() {
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS resolved_at TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS created_at TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT`,
+
+    // Inbox migrations (safe)
+    `ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS read_at TEXT`,
+    `ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS ack_at TEXT`,
+    `ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS severity INTEGER`,
   ]);
 
-  // Defaults for existing rows
+  // Defaults for existing rows where columns were just added (parameterized)
   await q(`UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`);
   await q(`UPDATE outlet_sessions SET status = COALESCE(status, 'open')`);
   await q(`UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`);
   await q(`UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0)`);
   await q(`UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, $1)`, [now]);
   await q(`UPDATE outlet_sessions SET updated_at = COALESCE(updated_at, created_at, $1)`, [now]);
+
+  await q(`UPDATE inbox_items SET severity = COALESCE(severity, 0)`);
 
   // 3) Indexes (one statement each)
   await execMany([
@@ -358,9 +357,6 @@ export async function ensureDb() {
 
     `CREATE INDEX IF NOT EXISTS idx_notes_user ON user_notes(org_id, user_id, ts)`,
 
-    `CREATE INDEX IF NOT EXISTS idx_confessional_user_created ON confessional_entries(user_id, created_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_confessional_org_created ON confessional_entries(org_id, created_at DESC)`,
-
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_org_created ON outlet_sessions(org_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_user_created ON outlet_sessions(user_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_outlet_sessions_visibility ON outlet_sessions(org_id, visibility)`,
@@ -372,10 +368,10 @@ export async function ensureDb() {
     `CREATE INDEX IF NOT EXISTS idx_outlet_escalations_session ON outlet_escalations(session_id, created_at DESC)`,
 
     // ✅ Inbox indexes
-    `CREATE INDEX IF NOT EXISTS idx_inbox_messages_org_created ON inbox_messages(org_id, created_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_inbox_messages_org_audience ON inbox_messages(org_id, audience_role, created_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_inbox_receipts_user_updated ON inbox_receipts(user_id, updated_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_inbox_receipts_msg ON inbox_receipts(message_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_inbox_user_created ON inbox_items(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_inbox_org_created ON inbox_items(org_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_inbox_unread ON inbox_items(user_id, read_at, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_staff_msgs_user_created ON inbox_staff_messages(user_id, created_at DESC)`,
   ]);
 }
 
@@ -407,10 +403,14 @@ export async function createUser(params: { username: string; password: string; o
     createdAt: nowIso(),
   };
 
-  await q(
-    "INSERT INTO users (id, username, password_hash, org_id, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-    [user.id, user.username, user.passwordHash, user.orgId, user.role, user.createdAt],
-  );
+  await q("INSERT INTO users (id, username, password_hash, org_id, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [
+    user.id,
+    user.username,
+    user.passwordHash,
+    user.orgId,
+    user.role,
+    user.createdAt,
+  ]);
 
   return user;
 }
@@ -491,10 +491,12 @@ export async function createCheckIn(params: {
     stress: params.stress,
     note: params.note ?? null,
     tags,
+    // keep API compatibility: still return tagsJson as a string
     tagsJson: JSON.stringify(tags),
     createdAt: nowIso(),
   };
 
+  // ✅ store JSONB as an actual array (not a string)
   await q(
     `INSERT INTO checkins (id, org_id, user_id, ts, day_key, mood, energy, stress, note, tags_json, created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
@@ -508,7 +510,7 @@ export async function createCheckIn(params: {
       checkin.energy,
       checkin.stress,
       checkin.note,
-      checkin.tags,
+      checkin.tags, // JSONB array
       checkin.createdAt,
     ],
   );
@@ -549,6 +551,7 @@ export async function listCheckIns(params: { orgId: string; userId?: string; day
       stress: r.stress,
       note: r.note,
       tags,
+      // keep API compatibility
       tagsJson: JSON.stringify(tags),
       createdAt: r.created_at,
     };
@@ -669,6 +672,7 @@ export async function summaryForUser(params: { orgId: string; userId: string; da
   };
 }
 
+/** Org-level analytics (admin/manager) */
 export async function orgSummary(params: { orgId: string; days?: number }) {
   const days = Math.max(7, Math.min(params.days ?? 30, 365));
   const since = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -744,63 +748,170 @@ export async function orgSummary(params: { orgId: string; days?: number }) {
   };
 }
 
-/** ✅ Confessional (Private Journal) */
-export async function createConfessionalEntry(params: { orgId: string; userId: string; content: string; tags?: string[] }) {
-  const createdAt = nowIso();
-  const tags = normalizeTags(params.tags ?? []);
-  const content = String(params.content ?? "").trim();
-  if (!content) throw new Error("Confessional entry content is required");
-
+/** Inbox helpers */
+export async function createInboxItem(params: {
+  orgId: string;
+  userId: string; // recipient
+  type: InboxItemType;
+  title: string;
+  body: string;
+  severity?: number;
+}) {
   const row = {
     id: nanoid(),
     orgId: params.orgId,
     userId: params.userId,
-    content,
-    tags,
-    tagsJson: JSON.stringify(tags),
-    createdAt,
+    type: params.type,
+    title: String(params.title ?? "").trim() || "Message",
+    body: String(params.body ?? "").trim() || "",
+    severity: Math.max(0, Math.min(toInt(params.severity, 0), 3)),
+    createdAt: nowIso(),
+    readAt: null as string | null,
+    ackAt: null as string | null,
   };
 
   await q(
-    `INSERT INTO confessional_entries (id, org_id, user_id, content, tags_json, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [row.id, row.orgId, row.userId, row.content, row.tags, row.createdAt],
+    `INSERT INTO inbox_items (id, org_id, user_id, type, title, body, severity, created_at, read_at, ack_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [row.id, row.orgId, row.userId, row.type, row.title, row.body, row.severity, row.createdAt, row.readAt, row.ackAt],
   );
 
-  return row;
+  return {
+    ...row,
+    isRead: false,
+    isAcked: false,
+  } satisfies InboxItem;
 }
 
-export async function listConfessionalEntries(params: { orgId: string; userId: string; limit?: number }) {
-  const limit = Math.max(1, Math.min(params.limit ?? 50, 200));
+export async function listInboxForUser(params: { orgId: string; userId: string; limit?: number }) {
+  const limit = Math.max(1, Math.min(params.limit ?? 100, 300));
 
   const rows = await q<any>(
-    `SELECT * FROM confessional_entries
+    `SELECT *
+     FROM inbox_items
      WHERE org_id = $1 AND user_id = $2
      ORDER BY created_at DESC
      LIMIT $3`,
     [params.orgId, params.userId, limit],
   );
 
-  return rows.map((r) => {
-    const tags = readJsonbArray(r.tags_json);
-    return {
+  return rows.map((r) => ({
+    id: r.id,
+    orgId: r.org_id,
+    userId: r.user_id,
+    type: (r.type || "system") as InboxItemType,
+    title: r.title,
+    body: r.body,
+    severity: toInt(r.severity, 0),
+    createdAt: r.created_at,
+    readAt: r.read_at ?? null,
+    ackAt: r.ack_at ?? null,
+    isRead: !!r.read_at,
+    isAcked: !!r.ack_at,
+  })) as InboxItem[];
+}
+
+export async function markInboxRead(params: { orgId: string; userId: string; itemId: string }) {
+  const now = nowIso();
+  const rows = await q<{ count: string }>(
+    `
+    WITH upd AS (
+      UPDATE inbox_items
+      SET read_at = COALESCE(read_at, $1)
+      WHERE id = $2 AND org_id = $3 AND user_id = $4
+      RETURNING 1
+    )
+    SELECT COUNT(*)::text as count FROM upd
+    `,
+    [now, params.itemId, params.orgId, params.userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+export async function markInboxAck(params: { orgId: string; userId: string; itemId: string }) {
+  const now = nowIso();
+  const rows = await q<{ count: string }>(
+    `
+    WITH upd AS (
+      UPDATE inbox_items
+      SET
+        read_at = COALESCE(read_at, $1),
+        ack_at  = COALESCE(ack_at, $1)
+      WHERE id = $2 AND org_id = $3 AND user_id = $4
+      RETURNING 1
+    )
+    SELECT COUNT(*)::text as count FROM upd
+    `,
+    [now, params.itemId, params.orgId, params.userId],
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+/** Staff messaging (admin/manager -> employee) */
+export async function listStaffInboxMessages(params: { orgId: string; userId: string; limit?: number }) {
+  const limit = Math.max(1, Math.min(params.limit ?? 100, 500));
+
+  const rows = await q<any>(
+    `
+    SELECT m.*, u.username as staff_username
+    FROM inbox_staff_messages m
+    LEFT JOIN users u ON u.id = m.staff_user_id
+    WHERE m.org_id = $1 AND m.user_id = $2
+    ORDER BY m.created_at DESC
+    LIMIT $3
+    `,
+    [params.orgId, params.userId, limit],
+  );
+
+  // Return ascending for a chat-like view
+  return rows
+    .map((r) => ({
       id: r.id,
       orgId: r.org_id,
       userId: r.user_id,
+      staffUserId: r.staff_user_id,
+      staffUsername: r.staff_username ?? null,
       content: r.content,
-      tags,
-      tagsJson: JSON.stringify(tags),
       createdAt: r.created_at,
-    };
-  });
+    }))
+    .reverse() as StaffInboxMessage[];
 }
 
-export async function deleteConfessionalEntry(orgId: string, userId: string, entryId: string) {
-  const rows = await q<{ count: string }>(
-    "WITH del AS (DELETE FROM confessional_entries WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING 1) SELECT COUNT(*)::text as count FROM del",
-    [entryId, orgId, userId],
+export async function createStaffInboxMessage(params: {
+  orgId: string;
+  userId: string; // employee
+  staffUserId: string;
+  content: string;
+}) {
+  const content = String(params.content ?? "").trim();
+  if (!content) throw new Error("Message content is required");
+
+  const row = {
+    id: nanoid(),
+    orgId: params.orgId,
+    userId: params.userId,
+    staffUserId: params.staffUserId,
+    content,
+    createdAt: nowIso(),
+  };
+
+  await q(
+    `INSERT INTO inbox_staff_messages (id, org_id, user_id, staff_user_id, content, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [row.id, row.orgId, row.userId, row.staffUserId, row.content, row.createdAt],
   );
-  return Number(rows[0]?.count ?? 0) > 0;
+
+  // Also create a user-visible inbox item (keeps the Inbox page meaningful)
+  await createInboxItem({
+    orgId: params.orgId,
+    userId: params.userId,
+    type: "staff_message",
+    title: "Message from staff",
+    body: content,
+    severity: 0,
+  });
+
+  return row;
 }
 
 /** Outlet analytics (manager/admin) */
@@ -1017,6 +1128,7 @@ export async function getUserProfile(orgId: string, userId: string) {
 
   if (!row) {
     const now = nowIso();
+    // ✅ store JSONB as array
     await q(
       `INSERT INTO user_profiles (user_id, org_id, full_name, email, phone, tags_json, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1072,6 +1184,7 @@ export async function upsertUserProfile(params: {
   const nextPhone = params.phone ?? (existing as any).phone ?? null;
   const nextTags = normalizeTags(params.tags ?? existingTags);
 
+  // ✅ store JSONB as array
   await q(
     `UPDATE user_profiles
      SET full_name = $1, email = $2, phone = $3, tags_json = $4, updated_at = $5
@@ -1094,10 +1207,15 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q(
-    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
-  );
+  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
+    row.id,
+    row.orgId,
+    row.userId,
+    row.authorId,
+    row.ts,
+    row.note,
+    row.createdAt,
+  ]);
 
   return row;
 }
@@ -1185,10 +1303,7 @@ export async function createOutletSession(params: {
 }
 
 export async function getOutletSession(params: { orgId: string; sessionId: string }) {
-  const rows = await q<any>("SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2", [
-    params.orgId,
-    params.sessionId,
-  ]);
+  const rows = await q<any>("SELECT * FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]);
   const r = rows[0];
   if (!r) return null;
 
@@ -1326,10 +1441,14 @@ export async function addOutletMessage(params: { orgId: string; sessionId: strin
     createdAt: nowIso(),
   };
 
-  await q(
-    `INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [msg.id, msg.orgId, msg.sessionId, msg.sender, msg.content, msg.createdAt],
-  );
+  await q(`INSERT INTO outlet_messages (id, org_id, session_id, sender, content, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [
+    msg.id,
+    msg.orgId,
+    msg.sessionId,
+    msg.sender,
+    msg.content,
+    msg.createdAt,
+  ]);
 
   await q(
     `UPDATE outlet_sessions
@@ -1375,6 +1494,17 @@ export async function escalateOutletSession(params: {
     params.sessionId,
   ]);
 
+  // Optional: also notify user (keeps Inbox active)
+  await createInboxItem({
+    orgId: params.orgId,
+    userId: (await q<any>("SELECT user_id FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]))[0]
+      ?.user_id,
+    type: "outlet_escalation",
+    title: "Your session was escalated",
+    body: params.reason ? `Reason: ${params.reason}` : "A staff member has been notified.",
+    severity: 1,
+  }).catch(() => {});
+
   return esc;
 }
 
@@ -1417,274 +1547,6 @@ export async function resolveOutletSession(params: {
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
-/** ✅ Inbox (Trust Loop): create, list, read, ack + staff stats */
-export type InboxMessage = {
-  id: string;
-  orgId: string;
-  createdBy: string;
-  audienceRole: InboxAudienceRole;
-  audienceUserId: string | null;
-  severity: InboxSeverity;
-  title: string;
-  body: string;
-  tags: string[];
-  tagsJson: string;
-  requiresAck: boolean;
-  createdAt: string;
-};
-
-export type InboxItemForUser = InboxMessage & {
-  receipt: {
-    id: string;
-    userId: string;
-    status: InboxReceiptStatus;
-    readAt: string | null;
-    ackAt: string | null;
-    updatedAt: string;
-    createdAt: string;
-  };
-};
-
-export async function createInboxMessage(params: {
-  orgId: string;
-  createdBy: string;
-  title: string;
-  body: string;
-  severity?: InboxSeverity;
-  tags?: string[];
-  requiresAck?: boolean;
-
-  // Targeting:
-  audienceRole?: InboxAudienceRole; // default: all
-  audienceUserId?: string | null; // optional: direct targeting wins
-}) {
-  const createdAt = nowIso();
-  const title = String(params.title ?? "").trim();
-  const body = String(params.body ?? "").trim();
-  if (!title) throw new Error("Inbox title is required");
-  if (!body) throw new Error("Inbox body is required");
-
-  const msg: InboxMessage = {
-    id: nanoid(),
-    orgId: params.orgId,
-    createdBy: params.createdBy,
-    audienceRole: normalizeAudienceRole(params.audienceRole ?? "all"),
-    audienceUserId: params.audienceUserId ?? null,
-    severity: normalizeSeverity(params.severity ?? "info"),
-    title,
-    body,
-    tags: normalizeTags(params.tags ?? []),
-    tagsJson: JSON.stringify(normalizeTags(params.tags ?? [])),
-    requiresAck: !!params.requiresAck,
-    createdAt,
-  };
-
-  await q(
-    `INSERT INTO inbox_messages (
-      id, org_id, created_by,
-      audience_role, audience_user_id,
-      severity, title, body, tags_json, requires_ack, created_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [
-      msg.id,
-      msg.orgId,
-      msg.createdBy,
-      msg.audienceRole,
-      msg.audienceUserId,
-      msg.severity,
-      msg.title,
-      msg.body,
-      msg.tags,
-      msg.requiresAck,
-      msg.createdAt,
-    ],
-  );
-
-  // Determine recipients
-  let recipients: Array<{ id: string }> = [];
-  if (msg.audienceUserId) {
-    const r = await q<any>("SELECT id FROM users WHERE org_id = $1 AND id = $2", [msg.orgId, msg.audienceUserId]);
-    recipients = r.map((x) => ({ id: x.id }));
-  } else if (msg.audienceRole === "all") {
-    const r = await q<any>("SELECT id FROM users WHERE org_id = $1", [msg.orgId]);
-    recipients = r.map((x) => ({ id: x.id }));
-  } else {
-    const r = await q<any>("SELECT id FROM users WHERE org_id = $1 AND role = $2", [msg.orgId, msg.audienceRole]);
-    recipients = r.map((x) => ({ id: x.id }));
-  }
-
-  // Create receipts (audit trail)
-  const now = nowIso();
-  if (recipients.length) {
-    const values: string[] = [];
-    const args: any[] = [];
-    let i = 1;
-
-    for (const u of recipients) {
-      const receiptId = nanoid();
-      values.push(`($${i++}, $${i++}, $${i++}, $${i++}, 'unread', NULL, NULL, $${i++}, $${i++})`);
-      args.push(receiptId, msg.orgId, msg.id, u.id, now, now);
-    }
-
-    await q(
-      `INSERT INTO inbox_receipts (
-        id, org_id, message_id, user_id,
-        status, read_at, ack_at, created_at, updated_at
-      ) VALUES ${values.join(",")}
-      ON CONFLICT (message_id, user_id) DO NOTHING`,
-      args,
-    );
-  }
-
-  return msg;
-}
-
-export async function listInboxForUser(params: { orgId: string; userId: string; limit?: number }) {
-  const limit = Math.max(1, Math.min(params.limit ?? 50, 200));
-
-  const rows = await q<any>(
-    `
-    SELECT
-      m.*,
-      r.id as receipt_id,
-      r.user_id as receipt_user_id,
-      r.status as receipt_status,
-      r.read_at as receipt_read_at,
-      r.ack_at as receipt_ack_at,
-      r.created_at as receipt_created_at,
-      r.updated_at as receipt_updated_at
-    FROM inbox_receipts r
-    JOIN inbox_messages m ON m.id = r.message_id AND m.org_id = r.org_id
-    WHERE r.org_id = $1 AND r.user_id = $2
-    ORDER BY m.created_at DESC
-    LIMIT $3
-    `,
-    [params.orgId, params.userId, limit],
-  );
-
-  return rows.map((r) => {
-    const tags = readJsonbArray(r.tags_json);
-    const msg: InboxMessage = {
-      id: r.id,
-      orgId: r.org_id,
-      createdBy: r.created_by,
-      audienceRole: normalizeAudienceRole(r.audience_role),
-      audienceUserId: r.audience_user_id ?? null,
-      severity: normalizeSeverity(r.severity),
-      title: r.title,
-      body: r.body,
-      tags,
-      tagsJson: JSON.stringify(tags),
-      requiresAck: !!r.requires_ack,
-      createdAt: r.created_at,
-    };
-
-    const item: InboxItemForUser = {
-      ...msg,
-      receipt: {
-        id: r.receipt_id,
-        userId: r.receipt_user_id,
-        status: normalizeReceiptStatus(r.receipt_status),
-        readAt: r.receipt_read_at ?? null,
-        ackAt: r.receipt_ack_at ?? null,
-        createdAt: r.receipt_created_at,
-        updatedAt: r.receipt_updated_at,
-      },
-    };
-    return item;
-  });
-}
-
-export async function markInboxRead(params: { orgId: string; userId: string; messageId: string }) {
-  const now = nowIso();
-
-  const rows = await q<{ count: string }>(
-    `
-    WITH upd AS (
-      UPDATE inbox_receipts
-      SET
-        status = CASE WHEN status = 'unread' THEN 'read' ELSE status END,
-        read_at = COALESCE(read_at, $1),
-        updated_at = $1
-      WHERE org_id = $2 AND user_id = $3 AND message_id = $4
-      RETURNING 1
-    )
-    SELECT COUNT(*)::text as count FROM upd
-    `,
-    [now, params.orgId, params.userId, params.messageId],
-  );
-
-  return Number(rows[0]?.count ?? 0) > 0;
-}
-
-export async function ackInbox(params: { orgId: string; userId: string; messageId: string }) {
-  const now = nowIso();
-
-  const rows = await q<{ count: string }>(
-    `
-    WITH upd AS (
-      UPDATE inbox_receipts
-      SET
-        status = 'acked',
-        read_at = COALESCE(read_at, $1),
-        ack_at = COALESCE(ack_at, $1),
-        updated_at = $1
-      WHERE org_id = $2 AND user_id = $3 AND message_id = $4
-      RETURNING 1
-    )
-    SELECT COUNT(*)::text as count FROM upd
-    `,
-    [now, params.orgId, params.userId, params.messageId],
-  );
-
-  return Number(rows[0]?.count ?? 0) > 0;
-}
-
-export async function listSentInboxMessages(params: { orgId: string; limit?: number; sinceIso?: string }) {
-  const limit = Math.max(1, Math.min(params.limit ?? 50, 200));
-  const sinceIso = params.sinceIso ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-  const rows = await q<any>(
-    `
-    SELECT
-      m.*,
-      (SELECT COUNT(*)::int FROM inbox_receipts r WHERE r.org_id = m.org_id AND r.message_id = m.id) as recipients_total,
-      (SELECT COUNT(*)::int FROM inbox_receipts r WHERE r.org_id = m.org_id AND r.message_id = m.id AND r.status IN ('read','acked')) as read_total,
-      (SELECT COUNT(*)::int FROM inbox_receipts r WHERE r.org_id = m.org_id AND r.message_id = m.id AND r.status = 'acked') as acked_total
-    FROM inbox_messages m
-    WHERE m.org_id = $1 AND m.created_at >= $2
-    ORDER BY m.created_at DESC
-    LIMIT $3
-    `,
-    [params.orgId, sinceIso, limit],
-  );
-
-  return rows.map((r) => {
-    const tags = readJsonbArray(r.tags_json);
-    return {
-      message: {
-        id: r.id,
-        orgId: r.org_id,
-        createdBy: r.created_by,
-        audienceRole: normalizeAudienceRole(r.audience_role),
-        audienceUserId: r.audience_user_id ?? null,
-        severity: normalizeSeverity(r.severity),
-        title: r.title,
-        body: r.body,
-        tags,
-        tagsJson: JSON.stringify(tags),
-        requiresAck: !!r.requires_ack,
-        createdAt: r.created_at,
-      },
-      stats: {
-        recipientsTotal: r.recipients_total ?? 0,
-        readTotal: r.read_total ?? 0,
-        ackedTotal: r.acked_total ?? 0,
-      },
-    };
-  });
-}
-
 /** Export helpers */
 function csvEscape(v: any) {
   const s = (v ?? "").toString();
@@ -1721,19 +1583,7 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
 
   for (const r of rows) {
     const tags = readJsonbArray(r.tags_json);
-    const line = [
-      r.id,
-      r.username,
-      r.user_id,
-      r.ts,
-      r.day_key,
-      r.mood,
-      r.energy,
-      r.stress,
-      r.note ?? "",
-      JSON.stringify(tags),
-      r.created_at,
-    ]
+    const line = [r.id, r.username, r.user_id, r.ts, r.day_key, r.mood, r.energy, r.stress, r.note ?? "", JSON.stringify(tags), r.created_at]
       .map(csvEscape)
       .join(",");
     lines.push(line);
@@ -1758,17 +1608,7 @@ export async function exportUsersCsv(params: { orgId: string }) {
 
   for (const r of rows) {
     const tags = readJsonbArray(r.tags_json);
-    const line = [
-      r.user_id,
-      r.username,
-      r.role,
-      r.created_at,
-      r.full_name ?? "",
-      r.email ?? "",
-      r.phone ?? "",
-      JSON.stringify(tags),
-      r.updated_at ?? "",
-    ]
+    const line = [r.user_id, r.username, r.role, r.created_at, r.full_name ?? "", r.email ?? "", r.phone ?? "", JSON.stringify(tags), r.updated_at ?? ""]
       .map(csvEscape)
       .join(",");
     lines.push(line);
