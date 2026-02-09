@@ -485,3 +485,69 @@ input[type="range"]{
   letter-spacing: .15px;
 }
 .miniTable tr:last-child td{ border-bottom: none; }
+/* ---------------------------
+   Auth (Login/Register)
+   --------------------------- */
+.authWrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(1200px 700px at 20% 10%, rgba(255,255,255,0.08), transparent 60%),
+              radial-gradient(900px 600px at 80% 30%, rgba(255,255,255,0.05), transparent 55%),
+              linear-gradient(180deg, #3b3f46 0%, #1b1f26 55%, #0f1217 100%);
+}
+
+.authCard {
+  width: min(920px, 100%);
+  background: rgba(20, 24, 30, 0.88);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px;
+  box-shadow: 0 18px 70px rgba(0,0,0,0.55);
+  overflow: hidden;
+}
+
+.authGrid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+}
+
+@media (max-width: 860px) {
+  .authGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.authLeft {
+  padding: 22px;
+  border-right: 1px solid rgba(255,255,255,0.08);
+}
+
+.authRight {
+  padding: 22px;
+}
+
+.authHeroTitle {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+}
+
+.authHeroSub {
+  margin-top: 6px;
+  opacity: 0.85;
+  line-height: 1.35;
+}
+
+.authForm {
+  margin-top: 14px;
+}
+
+.authActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  align-items: center;
+}
