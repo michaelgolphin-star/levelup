@@ -7,9 +7,9 @@ import LandingPage from "./LandingPage";
 import AuthPage from "./AuthPage";
 import DashboardPage from "./DashboardPage";
 import InviteAcceptPage from "./InviteAcceptPage";
+import OutletInboxPage from "./OutletInboxPage";
 import { OutletHomePage, OutletSessionPage } from "./OutletPage";
 import ResetPage from "./ResetPage";
-import TrustPage from "./TrustPage";
 
 export default function App() {
   return (
@@ -21,8 +21,10 @@ export default function App() {
         <Route path="/register" element={<AuthPage mode="register" />} />
 
         <Route path="/dashboard" element={<DashboardPage />} />
-
         <Route path="/invite/:token" element={<InviteAcceptPage />} />
+
+        {/* Inbox (quick list / nav) */}
+        <Route path="/outlet/inbox" element={<OutletInboxPage />} />
 
         {/* Counselor’s Office */}
         <Route path="/outlet" element={<OutletHomePage />} />
@@ -30,9 +32,6 @@ export default function App() {
 
         {/* Password reset */}
         <Route path="/reset" element={<ResetPage />} />
-
-        {/* Trust loop */}
-        <Route path="/trust" element={<TrustPage />} />
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
