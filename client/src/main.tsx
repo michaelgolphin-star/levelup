@@ -3,7 +3,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./ui/App";
-import "./styles.css";
+import "./ui/styles.css";
 
 /**
  * If React crashes during render or a promise rejects, iOS Safari can look like
