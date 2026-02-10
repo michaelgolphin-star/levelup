@@ -1,13 +1,11 @@
 // server/routes.ts (FULL REPLACEMENT)
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import {
   createOrg,
   createUser,
   findUserByUsername,
-  // Optional Path A helpers (present in storage.ts replacement)
-  setUserHandle,
-
   getOrg,
   getUserById,
   listUsers,
@@ -48,7 +46,7 @@ import {
   resolveOutletSession,
   outletAnalyticsSummary,
 
-  // ✅ Inbox
+  // ✅ Inbox (MATCHES storage.ts)
   listInboxForUser,
   markInboxRead,
   markInboxAck,
@@ -62,19 +60,6 @@ function wrap(fn: (req: Request, res: Response, next: NextFunction) => Promise<a
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
-}
-
-function isExpired(expiresAtIso: string) {
-  const t = new Date(expiresAtIso).getTime();
-  return !Number.isFinite(t) || t < Date.now();
-}
-
-function normalizeLoginIdentifier(s: string) {
-  return String(s ?? "").trim().toLowerCase();
-}
-
-function isEmailLike(s: string) {
-  return /\S+@\S+\.\S+/.test(String(s ?? "").trim());
 }
 
 async function assertUserInOrgOr404(orgId: string, userId: string, res: Response) {
@@ -121,7 +106,7 @@ async function generateOutletAiReply(params: { userMessage: string }) {
 /**
  * ✅ Rules (Path A)
  * - Register: handle-style usernames only (no @)
- * - Login: allow handle OR email (legacy)
+ * - Login: allow handle OR email (to support legacy users)
  */
 const HandleUsernameSchema = z
   .string()
@@ -149,13 +134,8 @@ const RegisterSchema = z.object({
 });
 
 const LoginSchema = z.object({
+  // ✅ allow email OR handle
   username: LoginIdSchema,
-  password: PasswordSchema,
-});
-
-const InviteAcceptSchema = z.object({
-  token: z.string().min(10),
-  username: HandleUsernameSchema,
   password: PasswordSchema,
 });
 
@@ -176,7 +156,6 @@ const HabitSchema = z.object({
 const OutletCreateSchema = z.object({
   category: z.string().max(80).optional().nullable(),
   visibility: z.enum(["private", "manager", "admin"]).default("private"),
-  kind: z.enum(["outlet", "confessional"]).optional(),
 });
 
 const OutletMessageSchema = z.object({
@@ -207,6 +186,16 @@ async function staffCanAccessOutletSession(auth: any, sessionId: string): Promis
   return sessions.some((s: any) => s.id === sessionId);
 }
 
+function normalizeLoginIdentifier(s: string) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
+// generate a safe demo password
+function makeDemoPassword() {
+  // meets min length; avoids spaces; includes punctuation
+  return `pass_${nanoid(10)}!`;
+}
+
 export function registerRoutes(app: Express) {
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -222,6 +211,7 @@ export function registerRoutes(app: Express) {
       const { username, password } = parsed.data;
       const orgName = parsed.data.orgName?.trim() || "My Org";
 
+      // normalize to match storage normalization
       const uNorm = normalizeLoginIdentifier(username);
 
       const existing = await findUserByUsername(uNorm);
@@ -233,7 +223,7 @@ export function registerRoutes(app: Express) {
       const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
       return res.json({
         token,
-        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role, handle: (user as any).handle ?? null },
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
         org,
       });
     }),
@@ -245,12 +235,11 @@ export function registerRoutes(app: Express) {
       const parsed = LoginSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      const loginId = normalizeLoginIdentifier(parsed.data.username);
+      const usernameInput = normalizeLoginIdentifier(parsed.data.username);
       const password = parsed.data.password;
 
-      // Path A: handles are still stored as users.username (and also users.handle),
-      // emails (legacy) are stored as users.username.
-      const user = await findUserByUsername(loginId);
+      // ✅ legacy-compatible: find by stored username (which might be an email)
+      const user = await findUserByUsername(usernameInput);
       if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
       const ok = verifyPassword(password, user.passwordHash);
@@ -262,58 +251,14 @@ export function registerRoutes(app: Express) {
       const token = signToken({ userId: user.id, orgId: user.orgId, role: user.role });
       return res.json({
         token,
-        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role, handle: (user as any).handle ?? null },
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
         org,
       });
     }),
   );
 
   // -----------------------------
-  // Invites (accept flow)
-  // -----------------------------
-  app.get(
-    "/api/invites/:token",
-    wrap(async (req, res) => {
-      const token = String(req.params.token || "");
-      const inv = await getInvite(token);
-      if (!inv) return res.status(404).json({ error: "Invite not found" });
-      if (isExpired(inv.expiresAt)) return res.status(410).json({ error: "Invite expired" });
-      return res.json({ invite: { token: inv.token, orgId: inv.orgId, role: inv.role, expiresAt: inv.expiresAt } });
-    }),
-  );
-
-  app.post(
-    "/api/invites/accept",
-    wrap(async (req, res) => {
-      const parsed = InviteAcceptSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const token = parsed.data.token;
-      const inv = await getInvite(token);
-      if (!inv) return res.status(404).json({ error: "Invite not found" });
-      if (isExpired(inv.expiresAt)) return res.status(410).json({ error: "Invite expired" });
-
-      const uNorm = normalizeLoginIdentifier(parsed.data.username);
-
-      const existing = await findUserByUsername(uNorm);
-      if (existing) return res.status(409).json({ error: "Username already exists" });
-
-      const user = await createUser({ username: uNorm, password: parsed.data.password, orgId: inv.orgId, role: inv.role });
-      await deleteInvite(token);
-
-      const org = await getOrg(inv.orgId);
-      const jwt = signToken({ userId: user.id, orgId: inv.orgId, role: user.role });
-
-      return res.json({
-        token: jwt,
-        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role, handle: (user as any).handle ?? null },
-        org,
-      });
-    }),
-  );
-
-  // -----------------------------
-  // ✅ Me
+  // ✅ Me (auth identity)
   // -----------------------------
   app.get(
     "/api/me",
@@ -327,31 +272,8 @@ export function registerRoutes(app: Express) {
           orgId: auth.orgId,
           role: auth.role,
           username: u?.username ?? undefined,
-          handle: (u as any)?.handle ?? null,
         },
       });
-    }),
-  );
-
-  // Optional Path A: claim/update handle for current user
-  app.post(
-    "/api/me/handle",
-    requireAuth,
-    wrap(async (req, res) => {
-      const schema = z.object({
-        handle: z
-          .string()
-          .min(3)
-          .max(40)
-          .regex(/^[a-z0-9._-]+$/i, "Handle can only contain letters, numbers, dot, underscore, hyphen")
-          .transform((s) => s.trim().toLowerCase()),
-      });
-      const parsed = schema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const ok = await setUserHandle({ orgId: auth.orgId, userId: auth.userId, handle: parsed.data.handle });
-      return res.json({ ok: !!ok });
     }),
   );
 
@@ -396,135 +318,83 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // Invites (admin)
+  // ✅ Admin helpers: create user + seed demo (1 & 2)
   // -----------------------------
   app.post(
-    "/api/invites",
+    "/api/admin/users",
     requireAuth,
     requireRole(["admin"]),
     wrap(async (req, res) => {
       const schema = z.object({
-        role: z.enum(["user", "manager", "admin"]).default("user"),
-        expiresInHours: z.number().int().min(1).max(24 * 14).default(24),
+        username: HandleUsernameSchema,
+        password: PasswordSchema,
+        role: z.enum(["user", "manager", "admin"]).optional().default("user"),
       });
-      const parsed = schema.safeParse(req.body || {});
+      const parsed = schema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
       const auth = (req as any).auth!;
-      const expiresAt = new Date(Date.now() + parsed.data.expiresInHours * 60 * 60 * 1000).toISOString();
+      const username = normalizeLoginIdentifier(parsed.data.username);
 
-      const invite = await createInvite({
+      const existing = await findUserByUsername(username);
+      if (existing) return res.status(409).json({ error: "Username already exists" });
+
+      const user = await createUser({
+        username,
+        password: parsed.data.password,
         orgId: auth.orgId,
         role: parsed.data.role,
-        expiresAt,
-        createdBy: auth.userId,
       });
 
-      return res.json({ invite });
+      return res.json({
+        user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+      });
     }),
   );
 
-  app.delete(
-    "/api/invites/:token",
+  app.post(
+    "/api/admin/users/seed-demo",
     requireAuth,
     requireRole(["admin"]),
     wrap(async (req, res) => {
-      const token = String(req.params.token || "");
-      const inv = await getInvite(token);
-      if (!inv) return res.json({ ok: true });
-      if (inv.orgId !== (req as any).auth!.orgId) return res.status(403).json({ error: "Forbidden" });
-
-      const ok = await deleteInvite(token);
-      return res.json({ ok: !!ok });
-    }),
-  );
-
-  // -----------------------------
-  // Password resets
-  // -----------------------------
-  app.post(
-    "/api/password-resets",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const schema = z.object({
-        userId: z.string().min(3),
-        expiresInHours: z.number().int().min(1).max(24 * 7).default(2),
-      });
-      const parsed = schema.safeParse(req.body || {});
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
       const auth = (req as any).auth!;
-      const target = await assertUserInOrgOr404(auth.orgId, parsed.data.userId, res);
-      if (!target) return;
-
-      const expiresAt = new Date(Date.now() + parsed.data.expiresInHours * 60 * 60 * 1000).toISOString();
-      const reset = await createPasswordReset({
-        orgId: auth.orgId,
-        userId: parsed.data.userId,
-        expiresAt,
-        createdBy: auth.userId,
+      const schema = z.object({
+        role: z.enum(["user", "manager"]).optional().default("user"),
       });
-
-      return res.json({ reset });
-    }),
-  );
-
-  app.get(
-    "/api/password-resets/:token",
-    wrap(async (req, res) => {
-      const token = String(req.params.token || "");
-      const reset = await getPasswordReset(token);
-      if (!reset) return res.status(404).json({ error: "Reset not found" });
-      if (isExpired(reset.expiresAt)) return res.status(410).json({ error: "Reset expired" });
-      return res.json({ reset: { token: reset.token, orgId: reset.orgId, userId: reset.userId, expiresAt: reset.expiresAt } });
-    }),
-  );
-
-  app.post(
-    "/api/password-resets/:token/consume",
-    wrap(async (req, res) => {
-      const token = String(req.params.token || "");
-      const schema = z.object({ password: PasswordSchema });
       const parsed = schema.safeParse(req.body || {});
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      const reset = await getPasswordReset(token);
-      if (!reset) return res.status(404).json({ error: "Reset not found" });
-      if (isExpired(reset.expiresAt)) return res.status(410).json({ error: "Reset expired" });
+      // try a human-friendly demo username first; fallback to nanoid
+      const base = "user";
+      let attempt = 1;
 
-      await setUserPassword(reset.userId, parsed.data.password);
-      await deletePasswordReset(token);
+      let username = `${base}${attempt}`;
+      while (true) {
+        const exists = await findUserByUsername(username);
+        if (!exists) break;
+        attempt += 1;
+        if (attempt > 50) {
+          username = `demo_${nanoid(6)}`;
+          break;
+        }
+        username = `${base}${attempt}`;
+      }
 
-      // auto-login after reset
-      const u = await getUserById(reset.userId);
-      if (!u) return res.status(404).json({ error: "User not found" });
+      const password = makeDemoPassword();
 
-      const org = await getOrg(u.orgId);
-      const jwt = signToken({ userId: u.id, orgId: u.orgId, role: u.role });
+      const user = await createUser({
+        username,
+        password,
+        orgId: auth.orgId,
+        role: parsed.data.role,
+      });
 
       return res.json({
-        token: jwt,
-        user: { id: u.id, username: u.username, orgId: u.orgId, role: u.role, handle: (u as any).handle ?? null },
-        org,
+        seeded: {
+          user: { id: user.id, username: user.username, orgId: user.orgId, role: user.role },
+          credentials: { username, password },
+        },
       });
-    }),
-  );
-
-  app.delete(
-    "/api/password-resets/:token",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const token = String(req.params.token || "");
-      const reset = await getPasswordReset(token);
-      if (!reset) return res.json({ ok: true });
-
-      const auth = (req as any).auth!;
-      if (reset.orgId !== auth.orgId) return res.status(403).json({ error: "Forbidden" });
-
-      const ok = await deletePasswordReset(token);
-      return res.json({ ok: !!ok });
     }),
   );
 
@@ -739,96 +609,6 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // Profiles (self)
-  // -----------------------------
-  app.get(
-    "/api/profile",
-    requireAuth,
-    wrap(async (req, res) => {
-      const auth = (req as any).auth!;
-      const profile = await getUserProfile(auth.orgId, auth.userId);
-      return res.json({ profile });
-    }),
-  );
-
-  app.post(
-    "/api/profile",
-    requireAuth,
-    wrap(async (req, res) => {
-      const schema = z.object({
-        fullName: z.string().max(120).optional().nullable(),
-        email: z.string().max(200).optional().nullable(),
-        phone: z.string().max(40).optional().nullable(),
-        tags: z.array(z.string().max(24)).max(20).optional(),
-      });
-      const parsed = schema.safeParse(req.body || {});
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const profile = await upsertUserProfile({
-        orgId: auth.orgId,
-        userId: auth.userId,
-        fullName: parsed.data.fullName ?? null,
-        email: parsed.data.email ?? null,
-        phone: parsed.data.phone ?? null,
-        tags: parsed.data.tags ?? [],
-      });
-      return res.json({ profile });
-    }),
-  );
-
-  // -----------------------------
-  // Notes (staff)
-  // -----------------------------
-  app.get(
-    "/api/users/:id/notes",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const userId = String(req.params.id || "");
-      const schema = z.object({ limit: z.string().optional() });
-      const parsed = schema.safeParse(req.query);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const target = await assertUserInOrgOr404(auth.orgId, userId, res);
-      if (!target) return;
-
-      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 100;
-      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
-
-      const notes = await listUserNotes({ orgId: auth.orgId, userId, limit });
-      return res.json({ notes });
-    }),
-  );
-
-  app.post(
-    "/api/users/:id/notes",
-    requireAuth,
-    requireRole(["admin", "manager"]),
-    wrap(async (req, res) => {
-      const userId = String(req.params.id || "");
-      const schema = z.object({ note: z.string().min(1).max(2000), ts: z.string().datetime().optional() });
-      const parsed = schema.safeParse(req.body || {});
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const target = await assertUserInOrgOr404(auth.orgId, userId, res);
-      if (!target) return;
-
-      const row = await addUserNote({
-        orgId: auth.orgId,
-        userId,
-        authorId: auth.userId,
-        note: parsed.data.note,
-        ts: parsed.data.ts,
-      });
-
-      return res.json({ note: row });
-    }),
-  );
-
-  // -----------------------------
   // Outlet
   // -----------------------------
   app.post(
@@ -842,30 +622,12 @@ export function registerRoutes(app: Express) {
       const session = await createOutletSession({
         orgId: auth.orgId,
         userId: auth.userId,
-        kind: parsed.data.kind,
         category: parsed.data.category ?? null,
         visibility: parsed.data.visibility,
         riskLevel: 0,
       });
 
       return res.json({ session });
-    }),
-  );
-
-  app.get(
-    "/api/outlet/sessions",
-    requireAuth,
-    wrap(async (req, res) => {
-      const schema = z.object({ limit: z.string().optional() });
-      const parsed = schema.safeParse(req.query);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-      const auth = (req as any).auth!;
-      const limitRaw = parsed.data.limit ? Number(parsed.data.limit) : 50;
-      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200)) : 50;
-
-      const sessions = await listOutletSessionsForUser({ orgId: auth.orgId, userId: auth.userId, limit });
-      return res.json({ sessions });
     }),
   );
 
