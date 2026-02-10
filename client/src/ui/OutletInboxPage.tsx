@@ -2,111 +2,142 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiGet } from "../lib/api";
-
-type Role = "user" | "manager" | "admin";
+import type { AuthPayload } from "../lib/api";
+import { apiGet, apiPost } from "../lib/api";
 
 type InboxItem = {
   id: string;
   orgId: string;
-  userId: string;
-
-  kind: "outlet";
-  title: string;
-  preview: string;
-
+  toUserId: string;
+  toUsername: string;
+  fromUserId: string;
+  fromUsername: string;
+  subject: string | null;
+  body: string;
+  status: "sent" | "acknowledged";
   createdAt: string;
-  isRead: boolean;
-  ackState: "none" | "acknowledged" | "dismissed";
-
-  // outlet linkage
-  outletSessionId?: string;
-  riskLevel?: number;
-  visibility?: "private" | "manager" | "admin";
-  status?: "open" | "escalated" | "closed" | "resolved";
+  ackAt?: string | null;
 };
 
-function fmt(iso: any) {
-  if (!iso) return "";
-  const d = new Date(String(iso));
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString();
-}
-
-function badgeForRisk(r: number) {
-  const n = Number(r || 0);
-  if (n >= 2) return { cls: "badge bad", label: "High risk" };
-  if (n === 1) return { cls: "badge warn", label: "Elevated" };
-  return { cls: "badge good", label: "Normal" };
+function TrustLoopBox() {
+  return (
+    <div className="panel" style={{ marginBottom: 12 }}>
+      <div className="panelTitle">
+        <span>Trust loop</span>
+        <span className="badge good">A1</span>
+      </div>
+      <div className="small" style={{ marginTop: 8, lineHeight: 1.7 }}>
+        <b>1) Private first:</b> the employee gets a safe space to think and document.
+        <br />
+        <b>2) Choice:</b> they can escalate to manager/admin only when ready.
+        <br />
+        <b>3) Staff response:</b> staff can acknowledge + resolve responsibly (not punish).
+        <br />
+        <b>4) Patterns:</b> org sees trends that affect wellbeing/retention/safety — without stripping dignity.
+        <br />
+        <br />
+        Want the doctrine? <Link to="/visibility">Responsible Visibility</Link>.
+      </div>
+    </div>
+  );
 }
 
 export default function OutletInboxPage() {
   const nav = useNavigate();
 
-  const [role, setRole] = useState<Role>("user");
+  const [auth, setAuth] = useState<AuthPayload | null>(null);
+  const role = auth?.role;
   const isStaff = role === "admin" || role === "manager";
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
 
+  // Staff view inbox list
   const [items, setItems] = useState<InboxItem[]>([]);
-  const [staffItems, setStaffItems] = useState<InboxItem[]>([]);
 
-  async function load() {
+  // Compose (staff -> user)
+  const [toUserId, setToUserId] = useState("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+
+  async function loadAuth() {
+    const me = await apiGet<{ auth: AuthPayload }>("/api/me");
+    setAuth(me.auth);
+  }
+
+  async function loadInbox() {
     setMsg(null);
     setLoading(true);
-
     try {
-      // auth snapshot
-      const me = await apiGet<{ auth: { role: Role } }>("/api/me");
-      setRole(me.auth.role);
-
-      // my inbox
-      const mine = await apiGet<{ items: InboxItem[] }>("/api/inbox?limit=50");
-      setItems(mine.items || []);
-
-      // staff inbox (if allowed)
-      if (me.auth.role === "admin" || me.auth.role === "manager") {
-        const staff = await apiGet<{ messages: InboxItem[] }>("/api/staff/inbox?limit=50");
-        setStaffItems(staff.messages || []);
-      } else {
-        setStaffItems([]);
+      if (!isStaff) {
+        setItems([]);
+        setMsg("Inbox is staff-only.");
+        return;
       }
+
+      // Current backend endpoints in your project use /api/staff/inbox
+      const r = await apiGet<{ items: InboxItem[] }>("/api/staff/inbox");
+      setItems(r.items || []);
     } catch (e: any) {
-      // If token missing/invalid, this will happen.
       setMsg(e?.message || "Failed to load inbox.");
-      nav("/login");
     } finally {
       setLoading(false);
     }
   }
 
-  async function markRead(id: string) {
+  async function send() {
+    setMsg(null);
     try {
-      await apiGet<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(id)}/read`);
-      setItems((prev) => prev.map((x) => (x.id === id ? { ...x, isRead: true } : x)));
-      setStaffItems((prev) => prev.map((x) => (x.id === id ? { ...x, isRead: true } : x)));
+      if (!isStaff) return;
+      const uid = toUserId.trim();
+      if (!uid) return setMsg("toUserId is required.");
+      if (!body.trim()) return setMsg("Message body is required.");
+
+      await apiPost("/api/staff/inbox", {
+        toUserId: uid,
+        subject: subject.trim() ? subject.trim() : null,
+        body: body.trim(),
+      });
+
+      setSubject("");
+      setBody("");
+      setMsg("Sent.");
+      await loadInbox();
     } catch (e: any) {
-      setMsg(e?.message || "Failed to mark read.");
+      setMsg(e?.message || "Failed to send.");
     }
   }
 
-  async function ack(id: string, action: "acknowledged" | "dismissed") {
+  async function ack(itemId: string) {
+    setMsg(null);
     try {
-      await apiGet<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(id)}/ack?action=${encodeURIComponent(action)}`);
-      setItems((prev) => prev.map((x) => (x.id === id ? { ...x, ackState: action } : x)));
-      setStaffItems((prev) => prev.map((x) => (x.id === id ? { ...x, ackState: action } : x)));
+      // NOTE: your current TS error showed ack expects { itemId }, not messageId.
+      await apiPost("/api/staff/inbox/ack", { itemId });
+      await loadInbox();
     } catch (e: any) {
       setMsg(e?.message || "Failed to acknowledge.");
     }
   }
 
   useEffect(() => {
-    load();
+    (async () => {
+      try {
+        await loadAuth();
+      } catch {
+        nav("/login");
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const unreadCount = useMemo(() => items.filter((x) => !x.isRead).length, [items]);
+  useEffect(() => {
+    if (!auth) return;
+    loadInbox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth]);
+
+  const sentCount = useMemo(() => items.filter((i) => i.status === "sent").length, [items]);
+  const ackCount = useMemo(() => items.filter((i) => i.status === "acknowledged").length, [items]);
 
   return (
     <div className="container">
@@ -114,126 +145,125 @@ export default function OutletInboxPage() {
         <div className="hdr">
           <div>
             <h1>Inbox</h1>
-            <div className="sub">
-              Your notifications • {unreadCount} unread • Role: {role}
-            </div>
+            <div className="sub">Staff messaging for support, follow-up, and resolution.</div>
           </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <Link className="btn" to="/dashboard">
               Dashboard
             </Link>
             <Link className="btn" to="/outlet">
               Counselor’s Office
             </Link>
-            <button className="btn" onClick={load} disabled={loading}>
+            <Link className="btn" to="/visibility">
+              Visibility
+            </Link>
+            <button className="btn" onClick={loadInbox} disabled={loading}>
               Refresh
             </button>
           </div>
         </div>
 
         <div className="body">
+          <TrustLoopBox />
+
           {msg ? <div className="toast bad">{msg}</div> : null}
-          {loading ? <div className="small">Loading…</div> : null}
 
-          {!loading && items.length === 0 ? <div className="small">No inbox items yet.</div> : null}
-
-          {!loading && items.length > 0 ? (
+          {!isStaff ? (
+            <div className="panel">
+              <div className="panelTitle">
+                <span>Access</span>
+                <span className="badge">Staff only</span>
+              </div>
+              <div className="small" style={{ marginTop: 10 }}>
+                This inbox is intended for <b>admin/manager</b> support messaging.
+              </div>
+            </div>
+          ) : (
             <>
-              <div className="panelTitle" style={{ marginTop: 4 }}>
-                <span>My Inbox</span>
-                <span className="badge">{items.length}</span>
-              </div>
+              <div className="grid2">
+                <div className="panel">
+                  <div className="panelTitle">
+                    <span>Compose</span>
+                    <span className="badge">{role}</span>
+                  </div>
 
-              <div className="list" style={{ marginTop: 12 }}>
-                {items.map((it) => {
-                  const rb = badgeForRisk(Number(it.riskLevel || 0));
-                  const goTo = it.outletSessionId ? `/outlet/${it.outletSessionId}` : "/outlet";
+                  <div style={{ marginTop: 10 }}>
+                    <div className="label">To userId</div>
+                    <input className="input" value={toUserId} onChange={(e) => setToUserId(e.target.value)} placeholder="Paste a userId" />
+                  </div>
 
-                  return (
-                    <div key={it.id} className="listItem">
-                      <div className="listTop">
-                        <div>
-                          <div className="listTitle">
-                            {it.title || "Update"} {!it.isRead ? <span className="badge warn">Unread</span> : null}
-                          </div>
-                          <div className="small">
-                            {it.preview || ""} • {fmt(it.createdAt)}
-                          </div>
-                        </div>
+                  <div style={{ marginTop: 10 }}>
+                    <div className="label">Subject (optional)</div>
+                    <input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Short subject" />
+                  </div>
 
-                        <div className="chips">
-                          <span className={rb.cls}>{rb.label}</span>
-                          {it.status ? <span className="badge">{it.status}</span> : null}
-                          {it.visibility ? <span className="badge">{it.visibility}</span> : null}
-                        </div>
-                      </div>
+                  <div style={{ marginTop: 10 }}>
+                    <div className="label">Message</div>
+                    <textarea className="textarea" rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Supportive, clear, outcome-focused…" />
+                  </div>
 
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                        <button className="btn primary" onClick={() => nav(goTo)}>
-                          Open
-                        </button>
-                        <button className="btn" onClick={() => markRead(it.id)} disabled={it.isRead}>
-                          Mark read
-                        </button>
-                        <button className="btn" onClick={() => ack(it.id, "acknowledged")} disabled={it.ackState !== "none"}>
-                          Acknowledge
-                        </button>
-                        <button className="btn danger" onClick={() => ack(it.id, "dismissed")} disabled={it.ackState !== "none"}>
-                          Dismiss
-                        </button>
-                      </div>
+                  <div style={{ marginTop: 10 }}>
+                    <button className="btn primary" onClick={send}>
+                      Send
+                    </button>
+                  </div>
 
-                      {it.ackState !== "none" ? (
-                        <div className="small" style={{ marginTop: 8 }}>
-                          Ack: {it.ackState}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          ) : null}
-
-          {isStaff ? (
-            <>
-              <div className="panelTitle" style={{ marginTop: 18 }}>
-                <span>Staff Inbox</span>
-                <span className="badge">{staffItems.length}</span>
-              </div>
-
-              {!loading && staffItems.length === 0 ? (
-                <div className="small" style={{ marginTop: 12 }}>
-                  No staff items.
+                  <div className="small" style={{ marginTop: 10, lineHeight: 1.6 }}>
+                    Tip: Keep messages <b>support-first</b>, document next steps, and avoid judgment language.
+                  </div>
                 </div>
-              ) : null}
 
-              <div className="list" style={{ marginTop: 12 }}>
-                {staffItems.map((it) => {
-                  const rb = badgeForRisk(Number(it.riskLevel || 0));
-                  const goTo = it.outletSessionId ? `/outlet/${it.outletSessionId}` : "/outlet";
-                  return (
-                    <div key={it.id} className="listItem" onClick={() => nav(goTo)} role="button" tabIndex={0}>
-                      <div className="listTop">
-                        <div>
-                          <div className="listTitle">{it.title || "Staff item"}</div>
-                          <div className="small">
-                            {it.preview || ""} • {fmt(it.createdAt)}
+                <div className="panel">
+                  <div className="panelTitle">
+                    <span>Staff inbox</span>
+                    <span className="badge">
+                      sent {sentCount} • ack {ackCount}
+                    </span>
+                  </div>
+
+                  {loading ? <div className="small" style={{ marginTop: 10 }}>Loading…</div> : null}
+
+                  {!loading && !items.length ? <div className="small" style={{ marginTop: 10 }}>No messages.</div> : null}
+
+                  <div className="list" style={{ marginTop: 10 }}>
+                    {items.map((it) => (
+                      <div key={it.id} className="listItemStatic">
+                        <div className="listTop">
+                          <div>
+                            <div className="listTitle">{it.subject ? it.subject : "Message"}</div>
+                            <div className="small">
+                              To <b>{it.toUsername || it.toUserId}</b> • From <b>{it.fromUsername || it.fromUserId}</b> •{" "}
+                              {it.createdAt ? new Date(it.createdAt).toLocaleString() : ""}
+                            </div>
+                          </div>
+                          <div className="chips">
+                            <span className={`badge ${it.status === "acknowledged" ? "good" : ""}`}>
+                              {it.status === "acknowledged" ? "Acknowledged" : "Sent"}
+                            </span>
+                            {it.status !== "acknowledged" ? (
+                              <button className="btn" onClick={() => ack(it.id)}>
+                                Acknowledge
+                              </button>
+                            ) : null}
                           </div>
                         </div>
-                        <div className="chips">
-                          <span className={rb.cls}>{rb.label}</span>
-                          {it.status ? <span className="badge">{it.status}</span> : null}
-                          {it.visibility ? <span className="badge">{it.visibility}</span> : null}
+
+                        <div className="small" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+                          {it.body}
                         </div>
+
+                        {it.ackAt ? (
+                          <div className="small" style={{ marginTop: 8 }}>
+                            Ack at {new Date(it.ackAt).toLocaleString()}
+                          </div>
+                        ) : null}
                       </div>
-                    </div>
-                  );
-                })}
+                    ))}
+                  </div>
+                </div>
               </div>
             </>
-          ) : null}
+          )}
         </div>
       </div>
     </div>
