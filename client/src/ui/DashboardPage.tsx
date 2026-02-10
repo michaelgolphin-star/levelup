@@ -5,6 +5,26 @@ import { Link, useNavigate } from "react-router-dom";
 import type { AuthPayload } from "../lib/api";
 import { api, apiGet, setToken } from "../lib/api";
 
+function TrustLoopCallout() {
+  return (
+    <div className="panel" style={{ marginBottom: 12 }}>
+      <div className="panelTitle">
+        <span>Trust loop</span>
+        <span className="badge good">A1</span>
+      </div>
+
+      <div className="small" style={{ marginTop: 8, lineHeight: 1.7 }}>
+        <b>Private first</b> → <b>reflection without looping</b> → <b>choice to escalate</b> →{" "}
+        <b>responsible staff action</b> → <b>resolution + retention + safety</b>, while preserving dignity.
+        <br />
+        <br />
+        Read the doctrine: <Link to="/visibility">Responsible Visibility</Link>. • Go to:{" "}
+        <Link to="/outlet">Counselor’s Office</Link>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const nav = useNavigate();
 
@@ -29,7 +49,11 @@ export default function DashboardPage() {
   async function loadAll() {
     setErr(null);
     try {
-      const [c, h, s] = await Promise.all([api.listCheckins(200), api.listHabits(false), api.summary(30)]);
+      const [c, h, s] = await Promise.all([
+        api.listCheckins(200),
+        api.listHabits(false),
+        api.summary(30),
+      ]);
       setCheckins(c.checkins || []);
       setHabits(h.habits || []);
       setSummary(s.summary || null);
@@ -117,6 +141,9 @@ export default function DashboardPage() {
         <div className="body">
           {err ? <div className="toast bad">{err}</div> : null}
 
+          {/* A1 Trust Loop callout */}
+          <TrustLoopCallout />
+
           <div className="grid2">
             <div className="panel">
               <div className="panelTitle">
@@ -127,26 +154,58 @@ export default function DashboardPage() {
               <div className="row" style={{ marginTop: 12 }}>
                 <div className="col">
                   <div className="label">Mood (1–10)</div>
-                  <input className="input" type="number" min={1} max={10} value={mood} onChange={(e) => setMood(Number(e.target.value))} />
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={mood}
+                    onChange={(e) => setMood(Number(e.target.value))}
+                  />
                 </div>
                 <div className="col">
                   <div className="label">Energy (1–10)</div>
-                  <input className="input" type="number" min={1} max={10} value={energy} onChange={(e) => setEnergy(Number(e.target.value))} />
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={energy}
+                    onChange={(e) => setEnergy(Number(e.target.value))}
+                  />
                 </div>
                 <div className="col">
                   <div className="label">Stress (1–10)</div>
-                  <input className="input" type="number" min={1} max={10} value={stress} onChange={(e) => setStress(Number(e.target.value))} />
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={stress}
+                    onChange={(e) => setStress(Number(e.target.value))}
+                  />
                 </div>
               </div>
 
               <div style={{ marginTop: 10 }}>
                 <div className="label">Note (optional)</div>
-                <textarea className="textarea" rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything you want to capture…" />
+                <textarea
+                  className="textarea"
+                  rows={3}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Anything you want to capture…"
+                />
               </div>
 
               <div style={{ marginTop: 10 }}>
                 <div className="label">Tags (optional, comma-separated)</div>
-                <input className="input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="sleep, overtime, conflict, focus…" />
+                <input
+                  className="input"
+                  value={tags}
+                  onChange={(e) => setTags(e.target.value)}
+                  placeholder="sleep, overtime, conflict, focus…"
+                />
               </div>
 
               <div style={{ marginTop: 10 }}>
@@ -158,7 +217,8 @@ export default function DashboardPage() {
               {summary ? (
                 <div className="small" style={{ marginTop: 12, lineHeight: 1.7 }}>
                   <b>30-day averages:</b> mood {summary.overall?.moodAvg?.toFixed?.(1) ?? "—"} • energy{" "}
-                  {summary.overall?.energyAvg?.toFixed?.(1) ?? "—"} • stress {summary.overall?.stressAvg?.toFixed?.(1) ?? "—"} • total{" "}
+                  {summary.overall?.energyAvg?.toFixed?.(1) ?? "—"} • stress{" "}
+                  {summary.overall?.stressAvg?.toFixed?.(1) ?? "—"} • total{" "}
                   {summary.overall?.total ?? 0}
                 </div>
               ) : null}
@@ -189,7 +249,11 @@ export default function DashboardPage() {
                         </div>
                         <span className="badge">{new Date(c.ts).toLocaleString()}</span>
                       </div>
-                      {c.note ? <div className="small" style={{ marginTop: 6 }}>{c.note}</div> : null}
+                      {c.note ? (
+                        <div className="small" style={{ marginTop: 6 }}>
+                          {c.note}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -225,7 +289,8 @@ export default function DashboardPage() {
           </div>
 
           <div className="small" style={{ marginTop: 12 }}>
-            Need to understand what the org can see? <Link to="/visibility">Read the visibility doctrine</Link>.
+            Need to understand what the org can see?{" "}
+            <Link to="/visibility">Read the visibility doctrine</Link>.
           </div>
 
           <div className="small" style={{ marginTop: 10 }}>
