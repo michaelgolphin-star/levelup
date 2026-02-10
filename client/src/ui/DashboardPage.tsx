@@ -2,82 +2,45 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import type { AuthPayload, CheckIn, Habit, Role, Summary } from "../lib/api";
+import type { AuthPayload, CheckIn, Habit, OrgSummary, Summary } from "../lib/api";
 import { api, apiGet } from "../lib/api";
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
 export default function DashboardPage() {
   const nav = useNavigate();
 
   const [auth, setAuth] = useState<AuthPayload | null>(null);
-  const role = auth?.role as Role | undefined;
-  const isStaff = role === "admin" || role === "manager";
+  const isStaff = auth?.role === "admin" || auth?.role === "manager";
 
-  const [toast, setToast] = useState<{ type: "good" | "bad"; text: string } | null>(null);
   const [loading, setLoading] = useState(true);
-
-  // Summary
-  const [days, setDays] = useState(30);
-  const [summary, setSummary] = useState<Summary | null>(null);
+  const [toast, setToast] = useState<{ type: "good" | "bad"; text: string } | null>(null);
 
   // Check-in form
   const [mood, setMood] = useState(7);
   const [energy, setEnergy] = useState(7);
-  const [stress, setStress] = useState(4);
+  const [stress, setStress] = useState(5);
   const [note, setNote] = useState("");
   const [tags, setTags] = useState("");
   const [savingCheckin, setSavingCheckin] = useState(false);
 
-  // Check-ins list
+  // Data
   const [checkins, setCheckins] = useState<CheckIn[]>([]);
-  const [loadingCheckins, setLoadingCheckins] = useState(false);
-
-  // Habits
   const [habits, setHabits] = useState<Habit[]>([]);
-  const [loadingHabits, setLoadingHabits] = useState(false);
-  const [habitName, setHabitName] = useState("");
-  const [habitTarget, setHabitTarget] = useState(3);
-  const [savingHabit, setSavingHabit] = useState(false);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [orgSummary, setOrgSummary] = useState<OrgSummary | null>(null);
 
-  const parsedTags = useMemo(() => {
-    return tags
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean)
-      .slice(0, 20);
-  }, [tags]);
+  const [days, setDays] = useState(30);
 
   async function loadAuth() {
     const me = await apiGet<{ auth: AuthPayload }>("/api/me");
     setAuth(me.auth);
-  }
-
-  async function loadSummary(nextDays = days) {
-    const r = await api.summary(nextDays);
-    setSummary(r.summary);
-  }
-
-  async function loadCheckins() {
-    setLoadingCheckins(true);
-    try {
-      const r = await api.listCheckins(200);
-      setCheckins(r.checkins || []);
-    } finally {
-      setLoadingCheckins(false);
-    }
-  }
-
-  async function loadHabits() {
-    setLoadingHabits(true);
-    try {
-      const r = await api.listHabits(false);
-      setHabits(r.habits || []);
-    } finally {
-      setLoadingHabits(false);
-    }
   }
 
   async function bootstrap() {
@@ -85,10 +48,22 @@ export default function DashboardPage() {
     setLoading(true);
     try {
       await loadAuth();
-      await Promise.all([loadSummary(days), loadCheckins(), loadHabits()]);
+
+      const [c, h, s] = await Promise.all([api.listCheckins(200), api.listHabits(false), api.summary(days)]);
+      setCheckins(c.checkins || []);
+      setHabits(h.habits || []);
+      setSummary(s.summary || null);
+
+      // Staff-only org summary
+      try {
+        const os = await api.orgSummary(days);
+        setOrgSummary(os.summary || null);
+      } catch {
+        setOrgSummary(null);
+      }
     } catch (e: any) {
-      setToast({ type: "bad", text: e?.message || "Please log in again." });
-      nav("/login");
+      setToast({ type: "bad", text: e?.message || "Failed to load dashboard." });
+      setTimeout(() => nav("/login"), 250);
     } finally {
       setLoading(false);
     }
@@ -99,21 +74,43 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const parsedTags = useMemo(() => {
+    return tags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+  }, [tags]);
+
   async function createCheckin() {
     setToast(null);
     setSavingCheckin(true);
     try {
-      await api.createCheckin({
-        mood,
-        energy,
-        stress,
+      const r = await api.createCheckin({
+        mood: clamp(Number(mood), 1, 10),
+        energy: clamp(Number(energy), 1, 10),
+        stress: clamp(Number(stress), 1, 10),
         note: note.trim() ? note.trim() : undefined,
         tags: parsedTags.length ? parsedTags : undefined,
       });
+
       setToast({ type: "good", text: "Check-in saved." });
       setNote("");
       setTags("");
-      await Promise.all([loadSummary(days), loadCheckins()]);
+
+      // refresh key panels
+      const [c, s] = await Promise.all([api.listCheckins(200), api.summary(days)]);
+      setCheckins(c.checkins || []);
+      setSummary(s.summary || null);
+
+      if (isStaff) {
+        try {
+          const os = await api.orgSummary(days);
+          setOrgSummary(os.summary || null);
+        } catch {
+          // ignore
+        }
+      }
     } catch (e: any) {
       setToast({ type: "bad", text: e?.message || "Failed to save check-in." });
     } finally {
@@ -125,42 +122,22 @@ export default function DashboardPage() {
     setToast(null);
     try {
       await api.deleteCheckin(id);
-      setToast({ type: "good", text: "Check-in deleted." });
-      await Promise.all([loadSummary(days), loadCheckins()]);
+      setCheckins((prev) => prev.filter((c) => c.id !== id));
+      setToast({ type: "good", text: "Deleted." });
+
+      const s = await api.summary(days);
+      setSummary(s.summary || null);
+
+      if (isStaff) {
+        try {
+          const os = await api.orgSummary(days);
+          setOrgSummary(os.summary || null);
+        } catch {
+          // ignore
+        }
+      }
     } catch (e: any) {
       setToast({ type: "bad", text: e?.message || "Delete failed." });
-    }
-  }
-
-  async function createHabit() {
-    const name = habitName.trim();
-    if (!name) {
-      setToast({ type: "bad", text: "Habit name is required." });
-      return;
-    }
-    setToast(null);
-    setSavingHabit(true);
-    try {
-      await api.createHabit({ name, targetPerWeek: habitTarget });
-      setToast({ type: "good", text: "Habit added." });
-      setHabitName("");
-      setHabitTarget(3);
-      await loadHabits();
-    } catch (e: any) {
-      setToast({ type: "bad", text: e?.message || "Failed to add habit." });
-    } finally {
-      setSavingHabit(false);
-    }
-  }
-
-  async function archiveHabit(id: string) {
-    setToast(null);
-    try {
-      await api.archiveHabit(id);
-      setToast({ type: "good", text: "Habit archived." });
-      await loadHabits();
-    } catch (e: any) {
-      setToast({ type: "bad", text: e?.message || "Archive failed." });
     }
   }
 
@@ -263,6 +240,27 @@ export default function DashboardPage() {
                   </button>
                 </div>
 
+                {/* ✅ TRUST LOOP (Option A): Check-in visibility panel */}
+                <div className="list" style={{ marginTop: 14 }}>
+                  <div className="listItemStatic">
+                    <div className="listTitle">Trust loop: what’s visible (check-ins)</div>
+                    <div className="small" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                      • Your <b>note + tags</b> are for your self-tracking first.
+                      <br />
+                      • Your organization sees <b>patterns</b> (trends over time) to support wellbeing, retention, and safety —
+                      without violating individual dignity.
+                      <br />
+                      • Staff access is <b>role-based</b>. Managers/admins see dashboards and “early risk signals” when enabled.
+                      <br />
+                      • If you want private narrative + optional escalation, use{" "}
+                      <Link to="/outlet" style={{ textDecoration: "underline" }}>
+                        Counselor’s Office
+                      </Link>
+                      .
+                    </div>
+                  </div>
+                </div>
+
                 <div className="small" style={{ marginTop: 10 }}>
                   Counselor’s Office is separate: use it for narrative + escalation.
                 </div>
@@ -279,9 +277,17 @@ export default function DashboardPage() {
                       onChange={async (e) => {
                         const v = Number(e.target.value);
                         setDays(v);
+                        setToast(null);
                         try {
-                          await loadSummary(v);
-                        } catch {}
+                          const s = await api.summary(v);
+                          setSummary(s.summary || null);
+                          if (isStaff) {
+                            const os = await api.orgSummary(v);
+                            setOrgSummary(os.summary || null);
+                          }
+                        } catch (err: any) {
+                          setToast({ type: "bad", text: err?.message || "Failed to update summary." });
+                        }
                       }}
                     >
                       <option value={7}>7</option>
@@ -298,29 +304,102 @@ export default function DashboardPage() {
                     No summary yet.
                   </div>
                 ) : (
-                  <div style={{ marginTop: 12 }}>
-                    <div className="list">
-                      <div className="listItemStatic">
-                        <div className="listTitle">Streak</div>
-                        <div className="small">{summary.streak} days</div>
-                      </div>
-                      <div className="listItemStatic">
-                        <div className="listTitle">Mood avg</div>
-                        <div className="small">{summary.overall.moodAvg ?? "—"}</div>
-                      </div>
-                      <div className="listItemStatic">
-                        <div className="listTitle">Energy avg</div>
-                        <div className="small">{summary.overall.energyAvg ?? "—"}</div>
-                      </div>
-                      <div className="listItemStatic">
-                        <div className="listTitle">Stress avg</div>
-                        <div className="small">{summary.overall.stressAvg ?? "—"}</div>
-                      </div>
-                      <div className="listItemStatic">
-                        <div className="listTitle">Total check-ins</div>
-                        <div className="small">{summary.overall.total}</div>
+                  <div className="list" style={{ marginTop: 12 }}>
+                    <div className="listItemStatic">
+                      <div className="listTop">
+                        <div>
+                          <div className="listTitle">Streak</div>
+                          <div className="small">Days in a row: {summary.streak}</div>
+                        </div>
+                        <span className="badge">{summary.today}</span>
                       </div>
                     </div>
+
+                    <div className="listItemStatic">
+                      <div className="listTitle">Overall averages</div>
+                      <div className="row" style={{ marginTop: 10 }}>
+                        <div className="col">
+                          <div className="small">Mood</div>
+                          <div className="small">{summary.overall.moodAvg ?? "—"}</div>
+                        </div>
+                        <div className="col">
+                          <div className="small">Energy</div>
+                          <div className="small">{summary.overall.energyAvg ?? "—"}</div>
+                        </div>
+                        <div className="col">
+                          <div className="small">Stress</div>
+                          <div className="small">{summary.overall.stressAvg ?? "—"}</div>
+                        </div>
+                        <div className="col">
+                          <div className="small">Total</div>
+                          <div className="small">{summary.overall.total}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {isStaff && orgSummary ? (
+                      <div className="listItemStatic">
+                        <div className="listTitle">Org summary (staff)</div>
+                        <div className="small" style={{ marginTop: 6 }}>
+                          Aggregated org-level patterns over the selected time window.
+                        </div>
+                        <div className="row" style={{ marginTop: 10 }}>
+                          <div className="col">
+                            <div className="small">Mood avg</div>
+                            <div className="small">{orgSummary.overall.moodAvg ?? "—"}</div>
+                          </div>
+                          <div className="col">
+                            <div className="small">Energy avg</div>
+                            <div className="small">{orgSummary.overall.energyAvg ?? "—"}</div>
+                          </div>
+                          <div className="col">
+                            <div className="small">Stress avg</div>
+                            <div className="small">{orgSummary.overall.stressAvg ?? "—"}</div>
+                          </div>
+                          <div className="col">
+                            <div className="small">Check-ins</div>
+                            <div className="small">{orgSummary.overall.checkins}</div>
+                          </div>
+                          <div className="col">
+                            <div className="small">Users</div>
+                            <div className="small">{orgSummary.overall.users}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+
+              <div className="panel">
+                <div className="panelTitle">
+                  <span>Recent check-ins</span>
+                  <span className="badge">{checkins.length}</span>
+                </div>
+
+                {!checkins.length ? (
+                  <div className="small" style={{ marginTop: 12 }}>
+                    No check-ins yet.
+                  </div>
+                ) : (
+                  <div className="list" style={{ marginTop: 12 }}>
+                    {checkins.slice(0, 20).map((c) => (
+                      <div key={c.id} className="listItemStatic">
+                        <div className="listTop">
+                          <div>
+                            <div className="listTitle">
+                              {c.dayKey} • Mood {c.mood} • Energy {c.energy} • Stress {c.stress}
+                            </div>
+                            <div className="small">
+                              {c.note ? c.note : "—"} {c.tagsJson && c.tagsJson !== "[]" ? `• tags ${c.tagsJson}` : ""}
+                            </div>
+                          </div>
+                          <button className="btn danger" onClick={() => deleteCheckin(c.id)}>
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -328,90 +407,45 @@ export default function DashboardPage() {
               <div className="panel">
                 <div className="panelTitle">
                   <span>Habits</span>
-                  <button className="btn" onClick={loadHabits} disabled={loadingHabits}>
-                    Refresh
-                  </button>
+                  <span className="badge">{habits.length}</span>
                 </div>
 
-                <div className="row" style={{ marginTop: 12 }}>
-                  <div className="col">
-                    <div className="label">Habit name</div>
-                    <input
-                      className="input"
-                      value={habitName}
-                      onChange={(e) => setHabitName(e.target.value)}
-                      placeholder="Walk, meditate, stretch…"
-                    />
+                {!habits.length ? (
+                  <div className="small" style={{ marginTop: 12 }}>
+                    No habits yet. Add a few to track consistency.
                   </div>
-                  <div className="col" style={{ flexBasis: 220 }}>
-                    <div className="label">Target / week</div>
-                    <input
-                      className="input"
-                      type="number"
-                      min={1}
-                      max={14}
-                      value={habitTarget}
-                      onChange={(e) => setHabitTarget(Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="col" style={{ flexBasis: 160, alignSelf: "flex-end" }}>
-                    <button className="btn primary" onClick={createHabit} disabled={savingHabit}>
-                      {savingHabit ? "Adding…" : "Add"}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="list" style={{ marginTop: 12 }}>
-                  {habits.map((h: any) => (
-                    <div key={h.id} className="listItemStatic">
-                      <div className="listTop">
-                        <div>
-                          <div className="listTitle">{h.name}</div>
-                          <div className="small">Target: {h.targetPerWeek}/week</div>
-                        </div>
-                        <div className="chips">
-                          <button className="btn" onClick={() => archiveHabit(h.id)}>
+                ) : (
+                  <div className="list" style={{ marginTop: 12 }}>
+                    {habits.slice(0, 20).map((h) => (
+                      <div key={h.id} className="listItemStatic">
+                        <div className="listTop">
+                          <div>
+                            <div className="listTitle">{h.name}</div>
+                            <div className="small">Target per week: {h.targetPerWeek}</div>
+                          </div>
+                          <button
+                            className="btn"
+                            onClick={async () => {
+                              setToast(null);
+                              try {
+                                await api.archiveHabit(h.id);
+                                const r = await api.listHabits(false);
+                                setHabits(r.habits || []);
+                              } catch (e: any) {
+                                setToast({ type: "bad", text: e?.message || "Archive failed." });
+                              }
+                            }}
+                          >
                             Archive
                           </button>
                         </div>
                       </div>
-                    </div>
-                  ))}
-                  {!loadingHabits && habits.length === 0 ? <div className="small">No habits yet.</div> : null}
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panelTitle">
-                  <span>Recent check-ins</span>
-                  <button className="btn" onClick={loadCheckins} disabled={loadingCheckins}>
-                    Refresh
-                  </button>
-                </div>
-
-                <div className="list" style={{ marginTop: 12 }}>
-                  {checkins.map((c: any) => (
-                    <div key={c.id} className="listItemStatic">
-                      <div className="listTop">
-                        <div>
-                          <div className="listTitle">
-                            {c.dayKey} • Mood {c.mood} • Energy {c.energy} • Stress {c.stress}
-                          </div>
-                          <div className="small">{c.note ? c.note : "—"}</div>
-                        </div>
-                        <div className="chips">
-                          <button className="btn danger" onClick={() => deleteCheckin(c.id)}>
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  {!loadingCheckins && checkins.length === 0 ? <div className="small">No check-ins yet.</div> : null}
-                </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="small" style={{ marginTop: 10 }}>
-                  You can still keep things dignified: the point is patterns, not “spying.”
+                  Tip: Keep habits lightweight. The goal is consistency, not perfection.
                 </div>
               </div>
             </div>
