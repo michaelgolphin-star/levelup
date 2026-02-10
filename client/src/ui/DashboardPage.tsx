@@ -49,11 +49,7 @@ export default function DashboardPage() {
   async function loadAll() {
     setErr(null);
     try {
-      const [c, h, s] = await Promise.all([
-        api.listCheckins(200),
-        api.listHabits(false),
-        api.summary(30),
-      ]);
+      const [c, h, s] = await Promise.all([api.listCheckins(200), api.listHabits(false), api.summary(30)]);
       setCheckins(c.checkins || []);
       setHabits(h.habits || []);
       setSummary(s.summary || null);
@@ -82,6 +78,7 @@ export default function DashboardPage() {
       setNote("");
       setTags("");
       setCheckins((prev) => [r.checkin, ...prev]);
+
       const s = await api.summary(30);
       setSummary(s.summary || null);
     } catch (e: any) {
@@ -141,7 +138,6 @@ export default function DashboardPage() {
         <div className="body">
           {err ? <div className="toast bad">{err}</div> : null}
 
-          {/* A1 Trust Loop callout */}
           <TrustLoopCallout />
 
           <div className="grid2">
@@ -218,8 +214,7 @@ export default function DashboardPage() {
                 <div className="small" style={{ marginTop: 12, lineHeight: 1.7 }}>
                   <b>30-day averages:</b> mood {summary.overall?.moodAvg?.toFixed?.(1) ?? "—"} • energy{" "}
                   {summary.overall?.energyAvg?.toFixed?.(1) ?? "—"} • stress{" "}
-                  {summary.overall?.stressAvg?.toFixed?.(1) ?? "—"} • total{" "}
-                  {summary.overall?.total ?? 0}
+                  {summary.overall?.stressAvg?.toFixed?.(1) ?? "—"} • total {summary.overall?.total ?? 0}
                 </div>
               ) : null}
             </div>
@@ -289,8 +284,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="small" style={{ marginTop: 12 }}>
-            Need to understand what the org can see?{" "}
-            <Link to="/visibility">Read the visibility doctrine</Link>.
+            Need to understand what the org can see? <Link to="/visibility">Read the visibility doctrine</Link>.
           </div>
 
           <div className="small" style={{ marginTop: 10 }}>
