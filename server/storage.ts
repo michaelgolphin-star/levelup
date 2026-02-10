@@ -1,6 +1,7 @@
 // server/storage.ts (FULL REPLACEMENT)
 // Includes: org/users/checkins/habits/invites/resets/profiles/notes/outlet + analytics + exports
 // PLUS: Inbox (items) + staff messaging thread
+// PLUS (Path A): users.handle (optional), unique per org, login-by-handle support
 
 import { Pool } from "pg";
 import { nanoid } from "nanoid";
@@ -24,7 +25,8 @@ if (!DATABASE_URL) {
 // - if PGSSLMODE=require OR URL includes sslmode=require => ssl on
 // - else ssl off (works locally)
 const sslRequired =
-  (process.env.PGSSLMODE || "").toLowerCase() === "require" || DATABASE_URL.toLowerCase().includes("sslmode=require");
+  (process.env.PGSSLMODE || "").toLowerCase() === "require" ||
+  DATABASE_URL.toLowerCase().includes("sslmode=require");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -58,6 +60,15 @@ function dayKeyFromIso(iso: string) {
 
 function normalizeUsername(username: string) {
   return username.trim().toLowerCase();
+}
+
+function isEmailLike(s: string) {
+  return /\S+@\S+\.\S+/.test(String(s ?? "").trim());
+}
+
+function normalizeHandle(handle: string) {
+  // handle rules enforced at routes, but we normalize here too
+  return String(handle ?? "").trim().toLowerCase();
 }
 
 function toInt(v: any, fallback: number) {
@@ -186,6 +197,7 @@ export async function ensureDb() {
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
+      handle TEXT,
       password_hash TEXT NOT NULL,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
@@ -324,6 +336,9 @@ export async function ensureDb() {
 
   // 2) Migration safety: add missing columns (each statement separately)
   await execMany([
+    // Users (Path A)
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS handle TEXT`,
+
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS kind TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT`,
@@ -355,8 +370,21 @@ export async function ensureDb() {
 
   await q(`UPDATE inbox_items SET severity = COALESCE(severity, 0)`);
 
+  // Path A backfill (safe): if username looks like a handle and handle is null, set handle = username
+  // (legacy email usernames keep handle null until claimed)
+  await q(`
+    UPDATE users
+    SET handle = username
+    WHERE handle IS NULL
+      AND username IS NOT NULL
+      AND username NOT LIKE '%@%'
+  `);
+
   // 3) Indexes (one statement each)
   await execMany([
+    // Path A: handle unique per org (only when not null)
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_org_handle_unique ON users (org_id, handle) WHERE handle IS NOT NULL`,
+
     `CREATE INDEX IF NOT EXISTS idx_checkins_org_day ON checkins(org_id, day_key)`,
     `CREATE INDEX IF NOT EXISTS idx_checkins_user_day ON checkins(user_id, day_key)`,
     `CREATE INDEX IF NOT EXISTS idx_checkins_user_ts ON checkins(user_id, ts)`,
@@ -407,23 +435,25 @@ export async function getOrg(orgId: string) {
 
 /** Users */
 export async function createUser(params: { username: string; password: string; orgId: string; role: Role }) {
+  const username = normalizeUsername(params.username);
+
+  // Path A: if username is not an email, treat it as a handle too
+  const handle = isEmailLike(username) ? null : username;
+
   const user = {
     id: nanoid(),
-    username: normalizeUsername(params.username),
+    username,
+    handle,
     passwordHash: hashPassword(params.password),
     orgId: params.orgId,
     role: params.role,
     createdAt: nowIso(),
   };
 
-  await q("INSERT INTO users (id, username, password_hash, org_id, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [
-    user.id,
-    user.username,
-    user.passwordHash,
-    user.orgId,
-    user.role,
-    user.createdAt,
-  ]);
+  await q(
+    "INSERT INTO users (id, username, handle, password_hash, org_id, role, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    [user.id, user.username, user.handle, user.passwordHash, user.orgId, user.role, user.createdAt],
+  );
 
   return user;
 }
@@ -436,11 +466,52 @@ export async function findUserByUsername(username: string) {
   return {
     id: row.id,
     username: row.username,
+    handle: row.handle ?? null,
     passwordHash: row.password_hash,
     orgId: row.org_id,
     role: row.role as Role,
     createdAt: row.created_at,
   };
+}
+
+export async function findUserByHandle(params: { orgId: string; handle: string }) {
+  const h = normalizeHandle(params.handle);
+  if (!h) return null;
+
+  const rows = await q<any>(
+    "SELECT * FROM users WHERE org_id = $1 AND handle = $2",
+    [params.orgId, h],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    handle: row.handle ?? null,
+    passwordHash: row.password_hash,
+    orgId: row.org_id,
+    role: row.role as Role,
+    createdAt: row.created_at,
+  };
+}
+
+export async function setUserHandle(params: { orgId: string; userId: string; handle: string | null }) {
+  const handle = params.handle === null ? null : normalizeHandle(params.handle);
+
+  const rows = await q<{ count: string }>(
+    `
+    WITH upd AS (
+      UPDATE users
+      SET handle = $1
+      WHERE id = $2 AND org_id = $3
+      RETURNING 1
+    )
+    SELECT COUNT(*)::text as count FROM upd
+    `,
+    [handle, params.userId, params.orgId],
+  );
+
+  return Number(rows[0]?.count ?? 0) > 0;
 }
 
 export async function getUserById(userId: string) {
@@ -450,6 +521,7 @@ export async function getUserById(userId: string) {
   return {
     id: row.id,
     username: row.username,
+    handle: row.handle ?? null,
     passwordHash: row.password_hash,
     orgId: row.org_id,
     role: row.role as Role,
@@ -459,12 +531,13 @@ export async function getUserById(userId: string) {
 
 export async function listUsers(orgId: string) {
   const rows = await q<any>(
-    "SELECT id, username, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
+    "SELECT id, username, handle, org_id, role, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC",
     [orgId],
   );
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
+    handle: r.handle ?? null,
     orgId: r.org_id,
     role: r.role as Role,
     createdAt: r.created_at,
@@ -1226,15 +1299,10 @@ export async function addUserNote(params: { orgId: string; userId: string; autho
     createdAt: nowIso(),
   };
 
-  await q("INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
-    row.id,
-    row.orgId,
-    row.userId,
-    row.authorId,
-    row.ts,
-    row.note,
-    row.createdAt,
-  ]);
+  await q(
+    "INSERT INTO user_notes (id, org_id, user_id, author_id, ts, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [row.id, row.orgId, row.userId, row.authorId, row.ts, row.note, row.createdAt],
+  );
 
   return row;
 }
@@ -1521,7 +1589,10 @@ export async function escalateOutletSession(params: {
 
   // Optional: also notify user (keeps Inbox active) — ✅ guarded (no silent undefined userId)
   try {
-    const ownerRows = await q<any>("SELECT user_id FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]);
+    const ownerRows = await q<any>(
+      "SELECT user_id FROM outlet_sessions WHERE org_id = $1 AND id = $2",
+      [params.orgId, params.sessionId],
+    );
     const ownerId = ownerRows[0]?.user_id ? String(ownerRows[0].user_id) : null;
     if (ownerId) {
       await createInboxItem({
@@ -1615,7 +1686,19 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
 
   for (const r of rows) {
     const tags = readJsonbArray(r.tags_json);
-    const line = [r.id, r.username, r.user_id, r.ts, r.day_key, r.mood, r.energy, r.stress, r.note ?? "", JSON.stringify(tags), r.created_at]
+    const line = [
+      r.id,
+      r.username,
+      r.user_id,
+      r.ts,
+      r.day_key,
+      r.mood,
+      r.energy,
+      r.stress,
+      r.note ?? "",
+      JSON.stringify(tags),
+      r.created_at,
+    ]
       .map(csvEscape)
       .join(",");
     lines.push(line);
@@ -1626,7 +1709,7 @@ export async function exportCheckinsCsv(params: { orgId: string; userId?: string
 
 export async function exportUsersCsv(params: { orgId: string }) {
   const rows = await q<any>(
-    `SELECT u.id as user_id, u.username, u.role, u.created_at,
+    `SELECT u.id as user_id, u.username, u.handle, u.role, u.created_at,
             p.full_name, p.email, p.phone, p.tags_json, p.updated_at
      FROM users u
      LEFT JOIN user_profiles p ON p.user_id = u.id AND p.org_id = u.org_id
@@ -1635,12 +1718,34 @@ export async function exportUsersCsv(params: { orgId: string }) {
     [params.orgId],
   );
 
-  const headers = ["userId", "username", "role", "createdAt", "fullName", "email", "phone", "profileTags", "profileUpdatedAt"];
+  const headers = [
+    "userId",
+    "username",
+    "handle",
+    "role",
+    "createdAt",
+    "fullName",
+    "email",
+    "phone",
+    "profileTags",
+    "profileUpdatedAt",
+  ];
   const lines = [headers.join(",")];
 
   for (const r of rows) {
     const tags = readJsonbArray(r.tags_json);
-    const line = [r.user_id, r.username, r.role, r.created_at, r.full_name ?? "", r.email ?? "", r.phone ?? "", JSON.stringify(tags), r.updated_at ?? ""]
+    const line = [
+      r.user_id,
+      r.username,
+      r.handle ?? "",
+      r.role,
+      r.created_at,
+      r.full_name ?? "",
+      r.email ?? "",
+      r.phone ?? "",
+      JSON.stringify(tags),
+      r.updated_at ?? "",
+    ]
       .map(csvEscape)
       .join(",");
     lines.push(line);
