@@ -118,9 +118,7 @@ const HandleUsernameSchema = z
   .max(40)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username can only contain letters, numbers, dot, underscore, hyphen");
 
-// Very light email check (good enough for login identifiers)
-const EmailLikeSchema = z.string().min(3).max(120).regex(/^\S+@\S+\.\S+$/, "Invalid email");
-
+// Login identifier: either handle OR email-like
 const LoginIdSchema = z
   .string()
   .min(3)
