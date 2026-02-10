@@ -107,22 +107,42 @@ async function generateOutletAiReply(params: { userMessage: string }) {
   };
 }
 
-const UsernameSchema = z
+/**
+ * ✅ Rules
+ * - Register: handle-style usernames only (no @)
+ * - Login: allow handle OR email (to support legacy users)
+ */
+const HandleUsernameSchema = z
   .string()
   .min(3)
   .max(40)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username can only contain letters, numbers, dot, underscore, hyphen");
 
+// Very light email check (good enough for login identifiers)
+const EmailLikeSchema = z.string().min(3).max(120).regex(/^\S+@\S+\.\S+$/, "Invalid email");
+
+const LoginIdSchema = z
+  .string()
+  .min(3)
+  .max(120)
+  .transform((s) => s.trim())
+  .refine((s) => s.length >= 3, "Username/email required")
+  .refine(
+    (s) => /^[a-zA-Z0-9._-]+$/.test(s) || /^\S+@\S+\.\S+$/.test(s),
+    "Enter a username (letters/numbers/._-) or an email",
+  );
+
 const PasswordSchema = z.string().min(6).max(200);
 
 const RegisterSchema = z.object({
   orgName: z.string().min(2).max(80).optional(),
-  username: UsernameSchema,
+  username: HandleUsernameSchema,
   password: PasswordSchema,
 });
 
 const LoginSchema = z.object({
-  username: UsernameSchema,
+  // ✅ allow email OR handle
+  username: LoginIdSchema,
   password: PasswordSchema,
 });
 
@@ -173,6 +193,10 @@ async function staffCanAccessOutletSession(auth: any, sessionId: string): Promis
   return sessions.some((s: any) => s.id === sessionId);
 }
 
+function normalizeLoginIdentifier(s: string) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
 export function registerRoutes(app: Express) {
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -188,11 +212,14 @@ export function registerRoutes(app: Express) {
       const { username, password } = parsed.data;
       const orgName = parsed.data.orgName?.trim() || "My Org";
 
-      const existing = await findUserByUsername(username);
+      // normalize to match storage normalization
+      const uNorm = normalizeLoginIdentifier(username);
+
+      const existing = await findUserByUsername(uNorm);
       if (existing) return res.status(409).json({ error: "Username already exists" });
 
       const org = await createOrg(orgName);
-      const user = await createUser({ username, password, orgId: org.id, role: "admin" });
+      const user = await createUser({ username: uNorm, password, orgId: org.id, role: "admin" });
 
       const token = signToken({ userId: user.id, orgId: org.id, role: user.role });
       return res.json({
@@ -209,8 +236,11 @@ export function registerRoutes(app: Express) {
       const parsed = LoginSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      const { username, password } = parsed.data;
-      const user = await findUserByUsername(username);
+      const usernameInput = normalizeLoginIdentifier(parsed.data.username);
+      const password = parsed.data.password;
+
+      // ✅ legacy-compatible: find by stored username (which might be an email)
+      const user = await findUserByUsername(usernameInput);
       if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
       const ok = verifyPassword(password, user.passwordHash);
