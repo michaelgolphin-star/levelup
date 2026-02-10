@@ -86,7 +86,7 @@ export default function DashboardPage() {
     setToast(null);
     setSavingCheckin(true);
     try {
-      const r = await api.createCheckin({
+      await api.createCheckin({
         mood: clamp(Number(mood), 1, 10),
         energy: clamp(Number(energy), 1, 10),
         stress: clamp(Number(stress), 1, 10),
@@ -98,7 +98,6 @@ export default function DashboardPage() {
       setNote("");
       setTags("");
 
-      // refresh key panels
       const [c, s] = await Promise.all([api.listCheckins(200), api.summary(days)]);
       setCheckins(c.checkins || []);
       setSummary(s.summary || null);
@@ -240,24 +239,41 @@ export default function DashboardPage() {
                   </button>
                 </div>
 
-                {/* ✅ TRUST LOOP (Option A): Check-in visibility panel */}
+                {/* ✅ TRUST LOOP (A+): Context-aware visibility */}
                 <div className="list" style={{ marginTop: 14 }}>
                   <div className="listItemStatic">
                     <div className="listTitle">Trust loop: what’s visible (check-ins)</div>
-                    <div className="small" style={{ marginTop: 6, lineHeight: 1.45 }}>
-                      • Your <b>note + tags</b> are for your self-tracking first.
-                      <br />
-                      • Your organization sees <b>patterns</b> (trends over time) to support wellbeing, retention, and safety —
-                      without violating individual dignity.
-                      <br />
-                      • Staff access is <b>role-based</b>. Managers/admins see dashboards and “early risk signals” when enabled.
-                      <br />
-                      • If you want private narrative + optional escalation, use{" "}
-                      <Link to="/outlet" style={{ textDecoration: "underline" }}>
-                        Counselor’s Office
-                      </Link>
-                      .
-                    </div>
+
+                    {!isStaff ? (
+                      <div className="small" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                        • Your check-ins help you track <b>you</b> first.
+                        <br />
+                        • Your organization receives <b>responsible visibility into patterns</b> that affect wellbeing,
+                        retention, and safety — without violating individual dignity.
+                        <br />
+                        • Staff visibility is <b>role-based</b> and should focus on trends, not personal judgment.
+                        <br />
+                        • For private narrative + optional escalation, use{" "}
+                        <Link to="/outlet" style={{ textDecoration: "underline" }}>
+                          Counselor’s Office
+                        </Link>
+                        .
+                      </div>
+                    ) : (
+                      <div className="small" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                        • You’re viewing this as <b>staff</b>. Use this to support people — not police them.
+                        <br />
+                        • Default stance: prioritize <b>aggregates + trends</b> (org patterns) over individual scrutiny.
+                        <br />
+                        • Treat “early risk signals” as a <b>prompt to offer support</b>, not as proof.
+                        <br />
+                        • If you need narrative context, rely on{" "}
+                        <Link to="/outlet/inbox" style={{ textDecoration: "underline" }}>
+                          Inbox
+                        </Link>{" "}
+                        escalation paths, not routine check-ins.
+                      </div>
+                    )}
                   </div>
                 </div>
 
