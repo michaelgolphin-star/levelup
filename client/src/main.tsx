@@ -1,8 +1,9 @@
-// client/src/main.tsx (FULL REPLACEMENT — adds ErrorBoundary so you never get a silent gray screen)
+// client/src/main.tsx (FULL REPLACEMENT — fixes CSS path + keeps ErrorBoundary)
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./ui/App";
-import "./styles.css";
+import "../styles.css"; // ✅ correct path (styles.css is in client/src)
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: any }> {
   constructor(props: any) {
