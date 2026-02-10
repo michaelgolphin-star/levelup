@@ -1,64 +1,89 @@
-// client/src/main.tsx (FULL REPLACEMENT — fixes CSS path + keeps ErrorBoundary)
+// client/src/main.tsx (FULL REPLACEMENT)
 
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./ui/App";
-import "../styles.css"; // ✅ correct path (styles.css is in client/src)
+import "./ui/styles.css";
 
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: any }> {
+/**
+ * If React crashes during render or a promise rejects, iOS Safari can look like
+ * a “blank gradient” screen. This overlay makes the real error visible.
+ */
+function showCrash(details: string) {
+  try {
+    const id = "crash-overlay";
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = id;
+      el.style.position = "fixed";
+      el.style.inset = "0";
+      el.style.zIndex = "99999";
+      el.style.padding = "16px";
+      el.style.overflow = "auto";
+      el.style.background = "rgba(0,0,0,0.88)";
+      el.style.color = "white";
+      el.style.fontFamily =
+        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `
+      <div style="max-width: 900px; margin: 0 auto;">
+        <div style="font-size: 18px; font-weight: 800; margin-bottom: 12px;">App crashed (runtime)</div>
+        <div style="font-size: 12px; opacity: 0.85; margin-bottom: 10px;">
+          This message is shown intentionally so we can fix the real cause.
+        </div>
+        <pre style="white-space: pre-wrap; line-height: 1.35; font-size: 12px;">${escapeHtml(details)}</pre>
+      </div>
+    `;
+  } catch {
+    // ignore overlay failures
+  }
+}
+
+function escapeHtml(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { err?: string }
+> {
   constructor(props: any) {
     super(props);
-    this.state = { error: null };
+    this.state = {};
   }
-
-  static getDerivedStateFromError(error: any) {
-    return { error };
+  static getDerivedStateFromError(err: any) {
+    return { err: String(err?.stack || err?.message || err) };
   }
-
-  componentDidCatch(error: any, info: any) {
-    // eslint-disable-next-line no-console
-    console.error("UI crashed:", error, info);
+  componentDidCatch(err: any) {
+    const msg = String(err?.stack || err?.message || err);
+    showCrash(msg);
   }
-
   render() {
-    if (this.state.error) {
-      const msg =
-        typeof this.state.error?.message === "string"
-          ? this.state.error.message
-          : "The app hit an unexpected error.";
-
+    if (this.state.err) {
       return (
-        <div className="container">
-          <div className="card">
-            <div className="hdr">
-              <div>
-                <h1>Something broke</h1>
-                <div className="sub">This is a UI runtime error (not a login problem).</div>
-              </div>
-              <span className="badge">ErrorBoundary</span>
-            </div>
-
-            <div className="body">
-              <div className="toast bad">{msg}</div>
-
-              <div className="small" style={{ marginTop: 12, lineHeight: 1.7 }}>
-                Try a hard refresh. If it keeps happening, open DevTools console and copy the error log.
-              </div>
-
-              <div style={{ marginTop: 12 }}>
-                <button className="btn" onClick={() => location.reload()}>
-                  Reload
-                </button>
-              </div>
-            </div>
-          </div>
+        <div style={{ padding: 16, color: "white" }}>
+          <div style={{ fontWeight: 800, marginBottom: 10 }}>App crashed</div>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{this.state.err}</pre>
         </div>
       );
     }
-
     return this.props.children;
   }
 }
+
+window.addEventListener("error", (e) => {
+  showCrash(String((e as any)?.error?.stack || (e as any)?.message || e));
+});
+window.addEventListener("unhandledrejection", (e) => {
+  showCrash(String((e as any)?.reason?.stack || (e as any)?.reason || e));
+});
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
