@@ -1,321 +1,199 @@
-// client/src/lib/api.ts (FULL REPLACEMENT — adds OutletKind + session.kind + create payload supports both)
+// client/src/lib/api.ts (FULL REPLACEMENT)
 export type Role = "user" | "manager" | "admin";
 
-export type AuthUser = { id: string; username: string; orgId: string; role: Role };
-export type Org = { id: string; name: string; createdAt: string };
-
-export type InviteInfo = { token: string; role: Role; expiresAt: string };
-export type UserProfile = {
+export type AuthPayload = {
   userId: string;
   orgId: string;
-  fullName: string | null;
-  email: string | null;
-  phone: string | null;
-  tagsJson: string;
-  createdAt: string;
-  updatedAt: string;
-};
-export type UserNote = {
-  id: string;
-  orgId: string;
-  userId: string;
-  authorId: string;
-  authorUsername: string;
-  ts: string;
-  note: string;
-  createdAt: string;
-};
-
-export type CheckIn = {
-  id: string;
-  orgId: string;
-  userId: string;
-  ts: string;
-  dayKey: string;
-  mood: number;
-  energy: number;
-  stress: number;
-  note: string | null;
-  tagsJson: string;
-  createdAt: string;
-};
-
-export type Habit = {
-  id: string;
-  orgId: string;
-  userId: string;
-  name: string;
-  targetPerWeek: number;
-  createdAt: string;
-  archivedAt: string | null;
-};
-
-export type OrgSummary = {
-  days: number;
-  overall: {
-    moodAvg: number | null;
-    energyAvg: number | null;
-    stressAvg: number | null;
-    checkins: number;
-    users: number;
-  };
-  byDay: Array<{
-    dayKey: string;
-    moodAvg: number;
-    energyAvg: number;
-    stressAvg: number;
-    checkins: number;
-    users: number;
-  }>;
-  risk: Array<{ userId: string; username: string; moodAvg: number; stressAvg: number; count: number }>;
-};
-
-export type Summary = {
-  days: number;
-  streak: number;
-  today: string;
-  overall: { moodAvg: number | null; energyAvg: number | null; stressAvg: number | null; total: number };
-  byDay: Array<{ dayKey: string; moodAvg: number; energyAvg: number; stressAvg: number; count: number }>;
-};
-
-/** Outlet / Counselor’s Office */
-export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
-export type OutletKind = "outlet" | "confessional";
-
-export type OutletSession = {
-  id: string;
-  orgId: string;
-  userId: string;
-
-  kind: OutletKind; // ✅ Option B
-
-  visibility: OutletVisibility;
-  category: string | null;
-  status: OutletStatus;
-  riskLevel: number;
-
-  createdAt: string;
-  updatedAt: string;
-
-  lastMessageAt?: string | null;
-  lastSender?: "user" | "ai" | "staff" | null;
-  messageCount?: number;
-
-  resolutionNote?: string | null;
-  resolvedByUserId?: string | null;
-  resolvedAt?: string | null;
-};
-
-export type OutletMessage = {
-  id: string;
-  orgId: string;
-  sessionId: string;
-  sender: "user" | "ai" | "staff";
-  content: string;
-  createdAt: string;
+  role: Role;
+  username?: string;
 };
 
 const TOKEN_KEY = "levelup_token";
-const LEGACY_TOKEN_KEYS = ["token", "levelupToken", "jwt"] as const;
 
 export function getToken() {
-  const t = localStorage.getItem(TOKEN_KEY);
-  if (t) return t;
-  for (const k of LEGACY_TOKEN_KEYS) {
-    const v = localStorage.getItem(k);
-    if (v) return v;
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
   }
-  return null;
 }
 
-export function setToken(t: string | null) {
-  if (!t) {
-    localStorage.removeItem(TOKEN_KEY);
-    for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
-    return;
+export function setToken(token: string | null) {
+  try {
+    if (!token) localStorage.removeItem(TOKEN_KEY);
+    else localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // ignore
   }
-  localStorage.setItem(TOKEN_KEY, t);
-  for (const k of LEGACY_TOKEN_KEYS) localStorage.removeItem(k);
 }
 
-const API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || "").toString().replace(/\/+$/, "");
-function apiUrl(path: string) {
-  if (!path.startsWith("/")) path = `/${path}`;
-  return `${API_BASE}${path}`;
-}
-
-function bestErrorMessage(data: any): string {
-  const msg = data?.error?.message ?? data?.error ?? data?.message ?? data?.detail ?? data?.statusText ?? null;
-  if (typeof msg === "string" && msg.trim()) return msg.trim();
-
-  const fieldErrors = data?.error?.fieldErrors;
-  if (fieldErrors && typeof fieldErrors === "object") {
-    const k = Object.keys(fieldErrors)[0];
-    const v = k ? fieldErrors[k] : null;
-    const first = Array.isArray(v) ? v[0] : null;
-    if (k && typeof first === "string" && first.trim()) return `${k}: ${first.trim()}`;
+function emitApiError(detail: any) {
+  try {
+    window.dispatchEvent(new CustomEvent("levelup_api_error", { detail }));
+  } catch {
+    // ignore
   }
-
-  return "Request failed";
 }
 
-async function req<T>(method: string, url: string, body?: any): Promise<T> {
+async function request<T>(method: string, path: string, body?: any): Promise<T> {
   const token = getToken();
 
-  const res = await fetch(apiUrl(url), {
-    method,
-    headers: {
-      Accept: "application/json",
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e: any) {
+    const msg = e?.message || "Network error";
+    emitApiError({ path, method, status: 0, message: msg });
+    throw new Error(msg);
+  }
 
-  const text = await res.text().catch(() => "");
-  const data = text
-    ? (() => {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return {};
-        }
-      })()
-    : {};
+  let data: any = null;
+  const text = await res.text();
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
 
-  if (!res.ok) throw new Error(bestErrorMessage(data));
+  if (!res.ok) {
+    const msg =
+      (data && (data.error?.message || data.error || data.message)) ||
+      `Request failed (${res.status})`;
+    emitApiError({ path, method, status: res.status, message: msg, data });
+    throw new Error(msg);
+  }
+
   return data as T;
 }
 
-/** Backwards-compatible helpers */
-export type AuthPayload = { userId: string; orgId: string; role: Role; username?: string };
+export async function apiGet<T>(path: string) {
+  return request<T>("GET", path);
+}
 
-export function apiGet<T>(url: string) {
-  return req<T>("GET", url);
+export async function apiPost<T>(path: string, body?: any) {
+  return request<T>("POST", path, body);
 }
-export function apiPost<T>(url: string, body?: any) {
-  return req<T>("POST", url, body);
-}
-export function apiPut<T>(url: string, body?: any) {
-  return req<T>("PUT", url, body);
-}
-export function apiDelete<T>(url: string) {
-  return req<T>("DELETE", url);
+
+export async function apiDelete<T>(path: string) {
+  return request<T>("DELETE", path);
 }
 
 export const api = {
-  async register(orgName: string, username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/register", { orgName, username, password });
-  },
+  // auth
   async login(username: string, password: string) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", "/api/auth/login", { username, password });
-  },
-  async org() {
-    return req<{ org: Org }>("GET", "/api/org");
-  },
-  async users() {
-    return req<{ users: AuthUser[] }>("GET", "/api/users");
-  },
-  async adminCreateUser(payload: { username: string; password: string; role: Role }) {
-    return req<{ user: AuthUser }>("POST", "/api/admin/users", payload);
-  },
-  async setRole(userId: string, role: Role) {
-    return req<{ ok: boolean }>("POST", "/api/users/role", { userId, role });
+    const r = await apiPost<{ token: string; user: any; org: any }>("/api/auth/login", { username, password });
+    setToken(r.token);
+    return r;
   },
 
-  async createCheckin(payload: { mood: number; energy: number; stress: number; note?: string; tags?: string[] }) {
-    return req<{ checkin: CheckIn }>("POST", "/api/checkins", payload);
+  async register(orgName: string, username: string, password: string) {
+    const r = await apiPost<{ token: string; user: any; org: any }>("/api/auth/register", { orgName, username, password });
+    setToken(r.token);
+    return r;
   },
-  async listCheckins(limit = 200) {
-    return req<{ checkins: CheckIn[] }>("GET", `/api/checkins?limit=${encodeURIComponent(String(limit))}`);
+
+  async me() {
+    return apiGet<{ auth: AuthPayload }>("/api/me");
+  },
+
+  // checkins
+  async createCheckin(payload: { mood: number; energy: number; stress: number; note?: string; tags?: string[] }) {
+    return apiPost<{ checkin: any }>("/api/checkins", payload);
+  },
+  async listCheckins(limit = 200, dayKey?: string) {
+    const qs = new URLSearchParams();
+    if (dayKey) qs.set("dayKey", dayKey);
+    qs.set("limit", String(limit));
+    return apiGet<{ checkins: any[] }>(`/api/checkins?${qs.toString()}`);
   },
   async deleteCheckin(id: string) {
-    return req<{ ok: boolean }>("DELETE", `/api/checkins/${encodeURIComponent(id)}`);
+    return apiDelete<{ ok: boolean }>(`/api/checkins/${encodeURIComponent(id)}`);
   },
 
+  // habits
   async createHabit(payload: { name: string; targetPerWeek: number }) {
-    return req<{ habit: Habit }>("POST", "/api/habits", payload);
+    return apiPost<{ habit: any }>("/api/habits", payload);
   },
   async listHabits(includeArchived = false) {
-    return req<{ habits: Habit[] }>("GET", `/api/habits?includeArchived=${encodeURIComponent(includeArchived ? "1" : "0")}`);
+    const qs = new URLSearchParams();
+    if (includeArchived) qs.set("includeArchived", "1");
+    return apiGet<{ habits: any[] }>(`/api/habits?${qs.toString()}`);
   },
   async archiveHabit(id: string) {
-    return req<{ ok: boolean }>("POST", `/api/habits/${encodeURIComponent(id)}/archive`);
+    return apiPost<{ ok: boolean }>(`/api/habits/${encodeURIComponent(id)}/archive`);
   },
 
+  // analytics
   async summary(days = 30) {
-    return req<{ summary: Summary }>("GET", `/api/analytics/summary?days=${encodeURIComponent(String(days))}`);
+    return apiGet<{ summary: any }>(`/api/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
   async orgSummary(days = 30) {
-    return req<{ summary: OrgSummary }>("GET", `/api/analytics/org-summary?days=${encodeURIComponent(String(days))}`);
+    return apiGet<{ summary: any }>(`/api/analytics/org-summary?days=${encodeURIComponent(String(days))}`);
   },
 
-  async createInvite(payload: { role: Role; expiresInDays: number }) {
-    return req<{ invite: InviteInfo; urlPath: string }>("POST", "/api/admin/invites", payload);
+  // users (admin/manager listing; admin role edits)
+  async listUsers() {
+    return apiGet<{ users: any[] }>("/api/users");
   },
-  async getInvite(token: string) {
-    return req<{ invite: InviteInfo; org: Org }>("GET", `/api/invites/${encodeURIComponent(token)}`);
-  },
-  async acceptInvite(token: string, payload: { username: string; password: string }) {
-    return req<{ token: string; user: AuthUser; org: Org }>("POST", `/api/invites/${encodeURIComponent(token)}/accept`, payload);
+  async setUserRole(userId: string, role: Role) {
+    return apiPost<{ ok: boolean }>("/api/users/role", { userId, role });
   },
 
-  async requestPasswordReset(username: string) {
-    return req<{ reset: { token: string; expiresAt: string } }>("POST", "/api/auth/request-reset", { username });
+  // ✅ admin helpers (1 & 2)
+  async adminCreateUser(payload: { username: string; password: string; role?: Role }) {
+    return apiPost<{ user: any }>("/api/admin/users", payload);
   },
-  async resetPassword(token: string, newPassword: string) {
-    return req<{ ok: boolean }>("POST", "/api/auth/reset", { token, newPassword });
-  },
-  async adminCreateResetToken(userId: string, expiresInMinutes = 60) {
-    return req<{ reset: { token: string; expiresAt: string } }>("POST", `/api/admin/users/${encodeURIComponent(userId)}/reset-token`, {
-      expiresInMinutes,
-    });
-  },
-
-  async getProfile(userId: string) {
-    return req<{ profile: UserProfile }>("GET", `/api/users/${encodeURIComponent(userId)}/profile`);
-  },
-  async updateProfile(userId: string, payload: { fullName?: string | null; email?: string | null; phone?: string | null; tags?: string[] }) {
-    return req<{ profile: UserProfile }>("PUT", `/api/users/${encodeURIComponent(userId)}/profile`, payload);
-  },
-  async listNotes(userId: string, limit = 100) {
-    return req<{ notes: UserNote[] }>("GET", `/api/users/${encodeURIComponent(userId)}/notes?limit=${encodeURIComponent(String(limit))}`);
-  },
-  async addNote(userId: string, note: string) {
-    return req<{ note: any }>("POST", `/api/users/${encodeURIComponent(userId)}/notes`, { note });
-  },
-
-  /** Outlet / Counselor’s Office */
-  async outletCreateSession(payload: { kind?: OutletKind; category?: string | null; visibility?: OutletVisibility }) {
-    return req<{ session: OutletSession }>("POST", "/api/outlet/sessions", payload);
-  },
-  async outletListMySessions(limit = 50) {
-    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?limit=${encodeURIComponent(String(limit))}`);
-  },
-  async outletListStaffSessions(limit = 200) {
-    return req<{ sessions: OutletSession[] }>("GET", `/api/outlet/sessions?view=staff&limit=${encodeURIComponent(String(limit))}`);
-  },
-  async outletGetSession(sessionId: string) {
-    return req<{ session: OutletSession; messages: OutletMessage[] }>("GET", `/api/outlet/sessions/${encodeURIComponent(sessionId)}`);
-  },
-  async outletSendMessage(sessionId: string, content: string) {
-    return req<{ userMessage: OutletMessage; aiMessage: OutletMessage; riskLevel: number }>(
-      "POST",
-      `/api/outlet/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { content },
+  async adminSeedDemoUser(role: "user" | "manager" = "user") {
+    return apiPost<{ seeded: { user: any; credentials: { username: string; password: string } } }>(
+      "/api/admin/users/seed-demo",
+      { role },
     );
   },
-  async outletEscalate(sessionId: string, payload: { escalatedToRole: "manager" | "admin"; assignedToUserId?: string | null; reason?: string | null }) {
-    return req<{ escalation: any }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/escalate`, payload);
+
+  // inbox
+  async listInbox(limit = 100) {
+    return apiGet<{ items: any[] }>(`/api/inbox?limit=${encodeURIComponent(String(limit))}`);
   },
-  async outletClose(sessionId: string) {
-    return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`, {});
+  async markInboxRead(id: string) {
+    return apiPost<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(id)}/read`);
   },
-  async outletResolve(sessionId: string, payload?: { resolutionNote?: string | null }) {
-    return req<{ ok: boolean }>("POST", `/api/outlet/sessions/${encodeURIComponent(sessionId)}/resolve`, payload || {});
+  async markInboxAck(id: string) {
+    return apiPost<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(id)}/ack`);
+  },
+
+  // staff inbox messages
+  async listStaffInboxMessages(userId: string, limit = 200) {
+    const qs = new URLSearchParams({ userId, limit: String(limit) });
+    return apiGet<{ messages: any[] }>(`/api/staff/inbox/messages?${qs.toString()}`);
+  },
+  async createStaffInboxMessage(userId: string, content: string) {
+    return apiPost<{ message: any }>("/api/staff/inbox/messages", { userId, content });
+  },
+
+  // outlet
+  async createOutletSession(payload: { category?: string | null; visibility?: "private" | "manager" | "admin" }) {
+    return apiPost<{ session: any }>("/api/outlet/sessions", payload || {});
+  },
+  async getOutletSession(sessionId: string) {
+    return apiGet<{ session: any; messages: any[] }>(`/api/outlet/sessions/${encodeURIComponent(sessionId)}`);
+  },
+  async postOutletMessage(sessionId: string, content: string) {
+    return apiPost<any>(`/api/outlet/sessions/${encodeURIComponent(sessionId)}/messages`, { content });
+  },
+  async closeOutletSession(sessionId: string) {
+    return apiPost<{ ok: boolean }>(`/api/outlet/sessions/${encodeURIComponent(sessionId)}/close`);
+  },
+  async resolveOutletSession(sessionId: string, resolutionNote?: string | null) {
+    return apiPost<{ ok: boolean }>(`/api/outlet/sessions/${encodeURIComponent(sessionId)}/resolve`, { resolutionNote });
   },
   async outletAnalyticsSummary(days = 30) {
-    return req<{ summary: any }>("GET", `/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
+    return apiGet<{ summary: any }>(`/api/outlet/analytics/summary?days=${encodeURIComponent(String(days))}`);
   },
 };
