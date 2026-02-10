@@ -108,7 +108,7 @@ async function generateOutletAiReply(params: { userMessage: string }) {
 }
 
 /**
- * ✅ Rules
+ * ✅ Rules (Path A)
  * - Register: handle-style usernames only (no @)
  * - Login: allow handle OR email (to support legacy users)
  */
@@ -118,7 +118,6 @@ const HandleUsernameSchema = z
   .max(40)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username can only contain letters, numbers, dot, underscore, hyphen");
 
-// Login identifier: either handle OR email-like
 const LoginIdSchema = z
   .string()
   .min(3)
