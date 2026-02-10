@@ -25,6 +25,24 @@ function TrustLoopCallout() {
   );
 }
 
+function RoleGateCallout({ role }: { role?: string }) {
+  const isStaff = role === "admin" || role === "manager";
+  if (!isStaff) return null;
+
+  return (
+    <div className="toast" style={{ marginBottom: 12 }}>
+      <b>Staff account:</b> admins/managers don’t submit check-ins.
+      <div className="small" style={{ marginTop: 6, lineHeight: 1.6 }}>
+        Create a <b>user</b> account for personal tracking. Go to{" "}
+        <Link to="/users" style={{ textDecoration: "underline" }}>
+          Users
+        </Link>{" "}
+        and add a user with role <code>user</code>, then log in as that user.
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const nav = useNavigate();
 
@@ -40,6 +58,8 @@ export default function DashboardPage() {
   const [checkins, setCheckins] = useState<any[]>([]);
   const [habits, setHabits] = useState<any[]>([]);
   const [summary, setSummary] = useState<any | null>(null);
+
+  const isStaff = auth?.role === "admin" || auth?.role === "manager";
 
   async function loadAuth() {
     const me = await apiGet<{ auth: AuthPayload }>("/api/me");
@@ -59,6 +79,12 @@ export default function DashboardPage() {
   }
 
   async function createCheckin() {
+    // ✅ Path A: staff accounts don't submit check-ins
+    if (isStaff) {
+      setErr("Admins/managers can’t submit check-ins. Create a user account for personal tracking (Users page).");
+      return;
+    }
+
     setErr(null);
     try {
       const tagArr = tags
@@ -129,6 +155,10 @@ export default function DashboardPage() {
             <Link className="btn" to="/visibility">
               Visibility
             </Link>
+            {/* ✅ quick path to create a user account */}
+            <Link className="btn" to="/users">
+              Users
+            </Link>
             <button className="btn danger" onClick={logout}>
               Log out
             </button>
@@ -138,14 +168,24 @@ export default function DashboardPage() {
         <div className="body">
           {err ? <div className="toast bad">{err}</div> : null}
 
+          <RoleGateCallout role={auth?.role} />
+
           <TrustLoopCallout />
 
           <div className="grid2">
-            <div className="panel">
+            <div className="panel" style={isStaff ? { opacity: 0.65 } : undefined}>
               <div className="panelTitle">
                 <span>New check-in</span>
                 <span className="badge">{streakLabel}</span>
               </div>
+
+              {isStaff ? (
+                <div className="small" style={{ marginTop: 12, lineHeight: 1.7 }}>
+                  You’re logged in as <b>{auth?.role}</b>. Staff accounts don’t submit check-ins.
+                  <br />
+                  Create a <b>user</b> account in <Link to="/users">Users</Link>, then log in as that user.
+                </div>
+              ) : null}
 
               <div className="row" style={{ marginTop: 12 }}>
                 <div className="col">
@@ -157,6 +197,7 @@ export default function DashboardPage() {
                     max={10}
                     value={mood}
                     onChange={(e) => setMood(Number(e.target.value))}
+                    disabled={isStaff}
                   />
                 </div>
                 <div className="col">
@@ -168,6 +209,7 @@ export default function DashboardPage() {
                     max={10}
                     value={energy}
                     onChange={(e) => setEnergy(Number(e.target.value))}
+                    disabled={isStaff}
                   />
                 </div>
                 <div className="col">
@@ -179,6 +221,7 @@ export default function DashboardPage() {
                     max={10}
                     value={stress}
                     onChange={(e) => setStress(Number(e.target.value))}
+                    disabled={isStaff}
                   />
                 </div>
               </div>
@@ -191,6 +234,7 @@ export default function DashboardPage() {
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                   placeholder="Anything you want to capture…"
+                  disabled={isStaff}
                 />
               </div>
 
@@ -201,11 +245,12 @@ export default function DashboardPage() {
                   value={tags}
                   onChange={(e) => setTags(e.target.value)}
                   placeholder="sleep, overtime, conflict, focus…"
+                  disabled={isStaff}
                 />
               </div>
 
               <div style={{ marginTop: 10 }}>
-                <button className="btn primary" onClick={createCheckin}>
+                <button className="btn primary" onClick={createCheckin} disabled={isStaff}>
                   Save check-in
                 </button>
               </div>
@@ -289,6 +334,12 @@ export default function DashboardPage() {
 
           <div className="small" style={{ marginTop: 10 }}>
             Logged in as <b>{auth?.userId ? auth.userId : "—"}</b>
+            {auth?.role ? (
+              <>
+                {" "}
+                • role <b>{auth.role}</b>
+              </>
+            ) : null}
           </div>
         </div>
       </div>
