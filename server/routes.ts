@@ -229,6 +229,26 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
+  // ✅ Me (auth identity) — Path A
+  // -----------------------------
+  app.get(
+    "/api/me",
+    requireAuth,
+    wrap(async (req, res) => {
+      const auth = (req as any).auth!;
+      const u = await getUserById(auth.userId);
+      return res.json({
+        auth: {
+          userId: auth.userId,
+          orgId: auth.orgId,
+          role: auth.role,
+          username: u?.username ?? undefined,
+        },
+      });
+    }),
+  );
+
+  // -----------------------------
   // Org + Users
   // -----------------------------
   app.get(
@@ -269,7 +289,7 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // ✅ Inbox (User) — FIXED NAMES + FIXED itemId
+  // ✅ Inbox (User)
   // -----------------------------
   app.get(
     "/api/inbox",
@@ -294,7 +314,7 @@ export function registerRoutes(app: Express) {
     wrap(async (req, res) => {
       const id = String(req.params.id || "");
       const auth = (req as any).auth!;
-      const ok = await markInboxRead({ orgId: auth.orgId, userId: auth.userId, itemId: id }); // ✅ itemId (NOT messageId)
+      const ok = await markInboxRead({ orgId: auth.orgId, userId: auth.userId, itemId: id });
       return res.json({ ok: !!ok });
     }),
   );
@@ -305,13 +325,13 @@ export function registerRoutes(app: Express) {
     wrap(async (req, res) => {
       const id = String(req.params.id || "");
       const auth = (req as any).auth!;
-      const ok = await markInboxAck({ orgId: auth.orgId, userId: auth.userId, itemId: id }); // ✅ itemId (NOT messageId)
+      const ok = await markInboxAck({ orgId: auth.orgId, userId: auth.userId, itemId: id });
       return res.json({ ok: !!ok });
     }),
   );
 
   // -----------------------------
-  // ✅ Inbox (Staff) — FIXED listSentInboxMessages -> listStaffInboxMessages
+  // ✅ Inbox (Staff)
   // -----------------------------
   app.get(
     "/api/staff/inbox/messages",
@@ -479,7 +499,7 @@ export function registerRoutes(app: Express) {
   );
 
   // -----------------------------
-  // Outlet (kept minimal here — your storage supports full outlet)
+  // Outlet
   // -----------------------------
   app.post(
     "/api/outlet/sessions",
