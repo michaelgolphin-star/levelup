@@ -3,7 +3,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./ui/App";
-import "./ui/styles.css";
+import "./styles.css";
 
 /**
  * If React crashes during render or a promise rejects, iOS Safari can look like
@@ -50,10 +50,7 @@ function escapeHtml(s: string) {
     .replaceAll("'", "&#039;");
 }
 
-class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { err?: string }
-> {
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err?: string }> {
   constructor(props: any) {
     super(props);
     this.state = {};
