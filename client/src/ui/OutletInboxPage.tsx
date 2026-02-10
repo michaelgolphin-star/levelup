@@ -1,22 +1,32 @@
 // client/src/ui/OutletInboxPage.tsx (FULL REPLACEMENT)
 
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import type { AuthPayload } from "../lib/api";
+import { Link } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
 
-type InboxItem = {
+type UserInboxItem = {
   id: string;
   orgId: string;
-  toUserId: string;
-  toUsername: string;
-  fromUserId: string;
-  fromUsername: string;
-  subject: string | null;
+  userId: string;
+  type: string;
+  title: string;
   body: string;
-  status: "sent" | "acknowledged";
+  severity: number;
   createdAt: string;
-  ackAt?: string | null;
+  readAt: string | null;
+  ackAt: string | null;
+  isRead: boolean;
+  isAcked: boolean;
+};
+
+type StaffThreadMessage = {
+  id: string;
+  orgId: string;
+  userId: string; // employee
+  staffUserId: string; // sender staff id
+  staffUsername?: string | null;
+  content: string;
+  createdAt: string;
 };
 
 function TrustLoopBox() {
@@ -24,14 +34,14 @@ function TrustLoopBox() {
     <div className="panel" style={{ marginBottom: 12 }}>
       <div className="panelTitle">
         <span>Trust loop</span>
-        <span className="badge good">A1</span>
+        <span className="badge good">A2</span>
       </div>
       <div className="small" style={{ marginTop: 8, lineHeight: 1.7 }}>
-        <b>1) Private first:</b> the employee gets a safe space to think and document.
+        <b>1) Private first:</b> employee gets a safe space to think and document.
         <br />
-        <b>2) Choice:</b> they can escalate to manager/admin only when ready.
+        <b>2) Choice:</b> escalate to manager/admin only when ready.
         <br />
-        <b>3) Staff response:</b> staff can acknowledge + resolve responsibly (not punish).
+        <b>3) Staff response:</b> acknowledge + resolve responsibly (not punish).
         <br />
         <b>4) Patterns:</b> org sees trends that affect wellbeing/retention/safety — without stripping dignity.
         <br />
@@ -43,101 +53,132 @@ function TrustLoopBox() {
 }
 
 export default function OutletInboxPage() {
-  const nav = useNavigate();
-
-  const [auth, setAuth] = useState<AuthPayload | null>(null);
-  const role = auth?.role;
-  const isStaff = role === "admin" || role === "manager";
-
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // Staff view inbox list
-  const [items, setItems] = useState<InboxItem[]>([]);
+  // We don't rely on /api/me (not present in server/routes.ts).
+  // Instead, we "discover" staff access by trying /api/users (admin/manager only).
+  const [isStaff, setIsStaff] = useState<boolean>(false);
 
-  // Compose (staff -> user)
-  const [toUserId, setToUserId] = useState("");
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
+  // User inbox (everyone can see their own inbox)
+  const [userItems, setUserItems] = useState<UserInboxItem[]>([]);
 
-  async function loadAuth() {
-    const me = await apiGet<{ auth: AuthPayload }>("/api/me");
-    setAuth(me.auth);
-  }
+  // Staff thread view (manager/admin only)
+  const [targetUserId, setTargetUserId] = useState("");
+  const [thread, setThread] = useState<StaffThreadMessage[]>([]);
+  const [threadLoading, setThreadLoading] = useState(false);
 
-  async function loadInbox() {
-    setMsg(null);
-    setLoading(true);
+  // Compose (staff -> employee)
+  const [compose, setCompose] = useState("");
+
+  async function detectStaff() {
     try {
-      if (!isStaff) {
-        setItems([]);
-        setMsg("Inbox is staff-only.");
-        return;
-      }
-
-      // Current backend endpoints in your project use /api/staff/inbox
-      const r = await apiGet<{ items: InboxItem[] }>("/api/staff/inbox");
-      setItems(r.items || []);
-    } catch (e: any) {
-      setMsg(e?.message || "Failed to load inbox.");
-    } finally {
-      setLoading(false);
+      await apiGet<{ users: any[] }>("/api/users");
+      setIsStaff(true);
+    } catch {
+      setIsStaff(false);
     }
   }
 
-  async function send() {
-    setMsg(null);
+  async function loadUserInbox() {
     try {
-      if (!isStaff) return;
-      const uid = toUserId.trim();
-      if (!uid) return setMsg("toUserId is required.");
-      if (!body.trim()) return setMsg("Message body is required.");
-
-      await apiPost("/api/staff/inbox", {
-        toUserId: uid,
-        subject: subject.trim() ? subject.trim() : null,
-        body: body.trim(),
-      });
-
-      setSubject("");
-      setBody("");
-      setMsg("Sent.");
-      await loadInbox();
+      const r = await apiGet<{ items: UserInboxItem[] }>("/api/inbox");
+      setUserItems(r.items || []);
     } catch (e: any) {
-      setMsg(e?.message || "Failed to send.");
+      setMsg(e?.message || "Failed to load inbox.");
+    }
+  }
+
+  async function markRead(itemId: string) {
+    try {
+      await apiPost<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(itemId)}/read`, {});
+      await loadUserInbox();
+    } catch (e: any) {
+      setMsg(e?.message || "Failed to mark read.");
     }
   }
 
   async function ack(itemId: string) {
-    setMsg(null);
     try {
-      // NOTE: your current TS error showed ack expects { itemId }, not messageId.
-      await apiPost("/api/staff/inbox/ack", { itemId });
-      await loadInbox();
+      await apiPost<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(itemId)}/ack`, {});
+      await loadUserInbox();
     } catch (e: any) {
       setMsg(e?.message || "Failed to acknowledge.");
     }
   }
 
+  async function loadThread() {
+    setMsg(null);
+    const uid = targetUserId.trim();
+    if (!uid) {
+      setThread([]);
+      return setMsg("Enter a userId to load the staff thread.");
+    }
+
+    setThreadLoading(true);
+    try {
+      const r = await apiGet<{ messages: StaffThreadMessage[] }>(
+        `/api/staff/inbox/messages?userId=${encodeURIComponent(uid)}&limit=300`,
+      );
+      setThread(r.messages || []);
+    } catch (e: any) {
+      setMsg(e?.message || "Failed to load staff thread.");
+      setThread([]);
+    } finally {
+      setThreadLoading(false);
+    }
+  }
+
+  async function sendToUser() {
+    setMsg(null);
+    const uid = targetUserId.trim();
+    const content = compose.trim();
+
+    if (!uid) return setMsg("Enter a userId before sending.");
+    if (!content) return setMsg("Message content is required.");
+
+    try {
+      await apiPost<{ message: any }>("/api/staff/inbox/messages", { userId: uid, content });
+      setCompose("");
+      setMsg("Sent.");
+      await loadThread();
+      // also refresh the sender's own inbox view (optional)
+      await loadUserInbox();
+    } catch (e: any) {
+      setMsg(e?.message || "Failed to send.");
+    }
+  }
+
+  async function refreshAll() {
+    setMsg(null);
+    setLoading(true);
+    try {
+      await detectStaff();
+      await loadUserInbox();
+      // if staff already has a target selected, refresh it too
+      if (isStaff && targetUserId.trim()) {
+        await loadThread();
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     (async () => {
+      setLoading(true);
       try {
-        await loadAuth();
-      } catch {
-        nav("/login");
+        await detectStaff();
+        await loadUserInbox();
+      } finally {
+        setLoading(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!auth) return;
-    loadInbox();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth]);
-
-  const sentCount = useMemo(() => items.filter((i) => i.status === "sent").length, [items]);
-  const ackCount = useMemo(() => items.filter((i) => i.status === "acknowledged").length, [items]);
+  const unreadCount = useMemo(() => userItems.filter((i) => !i.isRead).length, [userItems]);
+  const unackedCount = useMemo(() => userItems.filter((i) => !i.isAcked).length, [userItems]);
 
   return (
     <div className="container">
@@ -145,7 +186,7 @@ export default function OutletInboxPage() {
         <div className="hdr">
           <div>
             <h1>Inbox</h1>
-            <div className="sub">Staff messaging for support, follow-up, and resolution.</div>
+            <div className="sub">Support messaging + acknowledgements + responsible follow-up.</div>
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <Link className="btn" to="/dashboard">
@@ -157,7 +198,7 @@ export default function OutletInboxPage() {
             <Link className="btn" to="/visibility">
               Visibility
             </Link>
-            <button className="btn" onClick={loadInbox} disabled={loading}>
+            <button className="btn" onClick={refreshAll} disabled={loading}>
               Refresh
             </button>
           </div>
@@ -168,102 +209,148 @@ export default function OutletInboxPage() {
 
           {msg ? <div className="toast bad">{msg}</div> : null}
 
-          {!isStaff ? (
+          <div className="grid2">
+            {/* USER INBOX (everyone) */}
             <div className="panel">
               <div className="panelTitle">
-                <span>Access</span>
-                <span className="badge">Staff only</span>
+                <span>Your inbox</span>
+                <span className="badge">
+                  unread {unreadCount} • unacked {unackedCount}
+                </span>
               </div>
-              <div className="small" style={{ marginTop: 10 }}>
-                This inbox is intended for <b>admin/manager</b> support messaging.
+
+              {loading ? <div className="small" style={{ marginTop: 10 }}>Loading…</div> : null}
+
+              {!loading && !userItems.length ? (
+                <div className="small" style={{ marginTop: 10 }}>
+                  No items yet.
+                </div>
+              ) : null}
+
+              <div className="list" style={{ marginTop: 10 }}>
+                {userItems.map((it) => (
+                  <div key={it.id} className="listItemStatic">
+                    <div className="listTop">
+                      <div>
+                        <div className="listTitle">{it.title || "Message"}</div>
+                        <div className="small">
+                          {it.type ? <span className="badge">{it.type}</span> : null}{" "}
+                          {it.createdAt ? `• ${new Date(it.createdAt).toLocaleString()}` : ""}
+                        </div>
+                      </div>
+
+                      <div className="chips">
+                        <span className={`badge ${it.isAcked ? "good" : ""}`}>{it.isAcked ? "Acked" : "Needs ack"}</span>
+                        <span className={`badge ${it.isRead ? "good" : ""}`}>{it.isRead ? "Read" : "Unread"}</span>
+
+                        {!it.isRead ? (
+                          <button className="btn" onClick={() => markRead(it.id)}>
+                            Mark read
+                          </button>
+                        ) : null}
+
+                        {!it.isAcked ? (
+                          <button className="btn" onClick={() => ack(it.id)}>
+                            Acknowledge
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="small" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+                      {it.body}
+                    </div>
+
+                    {(it.readAt || it.ackAt) ? (
+                      <div className="small" style={{ marginTop: 8 }}>
+                        {it.readAt ? `Read: ${new Date(it.readAt).toLocaleString()}` : ""}
+                        {it.readAt && it.ackAt ? " • " : ""}
+                        {it.ackAt ? `Ack: ${new Date(it.ackAt).toLocaleString()}` : ""}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
               </div>
             </div>
-          ) : (
-            <>
-              <div className="grid2">
-                <div className="panel">
-                  <div className="panelTitle">
-                    <span>Compose</span>
-                    <span className="badge">{role}</span>
+
+            {/* STAFF THREAD (admin/manager only) */}
+            <div className="panel">
+              <div className="panelTitle">
+                <span>Staff thread</span>
+                <span className="badge">{isStaff ? "admin/manager" : "staff only"}</span>
+              </div>
+
+              {!isStaff ? (
+                <div className="small" style={{ marginTop: 10 }}>
+                  Staff threads are available to <b>admin/manager</b>.
+                </div>
+              ) : (
+                <>
+                  <div style={{ marginTop: 10 }}>
+                    <div className="label">Employee userId</div>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <input
+                        className="input"
+                        value={targetUserId}
+                        onChange={(e) => setTargetUserId(e.target.value)}
+                        placeholder="Paste employee userId"
+                      />
+                      <button className="btn" onClick={loadThread} disabled={threadLoading}>
+                        {threadLoading ? "Loading…" : "Load"}
+                      </button>
+                    </div>
+                    <div className="small" style={{ marginTop: 8 }}>
+                      This pulls from <code>/api/staff/inbox/messages</code>.
+                    </div>
                   </div>
 
-                  <div style={{ marginTop: 10 }}>
-                    <div className="label">To userId</div>
-                    <input className="input" value={toUserId} onChange={(e) => setToUserId(e.target.value)} placeholder="Paste a userId" />
-                  </div>
-
-                  <div style={{ marginTop: 10 }}>
-                    <div className="label">Subject (optional)</div>
-                    <input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Short subject" />
-                  </div>
-
-                  <div style={{ marginTop: 10 }}>
-                    <div className="label">Message</div>
-                    <textarea className="textarea" rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Supportive, clear, outcome-focused…" />
-                  </div>
-
-                  <div style={{ marginTop: 10 }}>
-                    <button className="btn primary" onClick={send}>
-                      Send
-                    </button>
+                  <div style={{ marginTop: 12 }}>
+                    <div className="label">Send message</div>
+                    <textarea
+                      className="textarea"
+                      rows={4}
+                      value={compose}
+                      onChange={(e) => setCompose(e.target.value)}
+                      placeholder="Supportive, clear, outcome-focused…"
+                    />
+                    <div style={{ marginTop: 10 }}>
+                      <button className="btn primary" onClick={sendToUser}>
+                        Send
+                      </button>
+                    </div>
                   </div>
 
                   <div className="small" style={{ marginTop: 10, lineHeight: 1.6 }}>
-                    Tip: Keep messages <b>support-first</b>, document next steps, and avoid judgment language.
-                  </div>
-                </div>
-
-                <div className="panel">
-                  <div className="panelTitle">
-                    <span>Staff inbox</span>
-                    <span className="badge">
-                      sent {sentCount} • ack {ackCount}
-                    </span>
+                    Tip: Keep messages <b>support-first</b>, document next steps, avoid judgment language.
                   </div>
 
-                  {loading ? <div className="small" style={{ marginTop: 10 }}>Loading…</div> : null}
+                  <hr />
 
-                  {!loading && !items.length ? <div className="small" style={{ marginTop: 10 }}>No messages.</div> : null}
+                  {threadLoading ? <div className="small">Loading thread…</div> : null}
+                  {!threadLoading && targetUserId.trim() && !thread.length ? <div className="small">No messages yet.</div> : null}
 
                   <div className="list" style={{ marginTop: 10 }}>
-                    {items.map((it) => (
-                      <div key={it.id} className="listItemStatic">
+                    {thread.map((m) => (
+                      <div key={m.id} className="listItemStatic">
                         <div className="listTop">
                           <div>
-                            <div className="listTitle">{it.subject ? it.subject : "Message"}</div>
+                            <div className="listTitle">Staff message</div>
                             <div className="small">
-                              To <b>{it.toUsername || it.toUserId}</b> • From <b>{it.fromUsername || it.fromUserId}</b> •{" "}
-                              {it.createdAt ? new Date(it.createdAt).toLocaleString() : ""}
+                              From <b>{m.staffUsername || m.staffUserId}</b> •{" "}
+                              {m.createdAt ? new Date(m.createdAt).toLocaleString() : ""}
                             </div>
                           </div>
-                          <div className="chips">
-                            <span className={`badge ${it.status === "acknowledged" ? "good" : ""}`}>
-                              {it.status === "acknowledged" ? "Acknowledged" : "Sent"}
-                            </span>
-                            {it.status !== "acknowledged" ? (
-                              <button className="btn" onClick={() => ack(it.id)}>
-                                Acknowledge
-                              </button>
-                            ) : null}
-                          </div>
                         </div>
-
                         <div className="small" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
-                          {it.body}
+                          {m.content}
                         </div>
-
-                        {it.ackAt ? (
-                          <div className="small" style={{ marginTop: 8 }}>
-                            Ack at {new Date(it.ackAt).toLocaleString()}
-                          </div>
-                        ) : null}
                       </div>
                     ))}
                   </div>
-                </div>
-              </div>
-            </>
-          )}
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
