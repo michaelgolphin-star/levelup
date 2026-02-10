@@ -95,8 +95,9 @@ function readJsonbArray(value: any): string[] {
 
 /** Outlet / grievance sessions */
 export type OutletVisibility = "private" | "manager" | "admin";
-export type OutletStatus = "open" | "escalated" | "closed";
+export type OutletStatus = "open" | "escalated" | "closed" | "resolved";
 export type OutletSender = "user" | "ai" | "staff";
+export type OutletKind = "outlet" | "confessional";
 
 function normalizeVisibility(v: any): OutletVisibility {
   const s = String(v || "").toLowerCase();
@@ -108,6 +109,7 @@ function normalizeVisibility(v: any): OutletVisibility {
 function normalizeStatus(v: any): OutletStatus {
   const s = String(v || "").toLowerCase();
   if (s === "escalated") return "escalated";
+  if (s === "resolved") return "resolved";
   if (s === "closed") return "closed";
   return "open";
 }
@@ -117,6 +119,12 @@ function normalizeSender(v: any): OutletSender {
   if (s === "ai") return "ai";
   if (s === "staff") return "staff";
   return "user";
+}
+
+function normalizeKind(v: any): OutletKind {
+  const s = String(v || "").toLowerCase();
+  if (s === "confessional") return "confessional";
+  return "outlet";
 }
 
 /** ✅ Inbox */
@@ -251,6 +259,9 @@ export async function ensureDb() {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+      kind TEXT NOT NULL DEFAULT 'outlet', -- ✅ Option B support
+
       visibility TEXT NOT NULL DEFAULT 'private',
       category TEXT,
       status TEXT NOT NULL DEFAULT 'open',
@@ -313,6 +324,7 @@ export async function ensureDb() {
 
   // 2) Migration safety: add missing columns (each statement separately)
   await execMany([
+    `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS kind TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS visibility TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS category TEXT`,
     `ALTER TABLE outlet_sessions ADD COLUMN IF NOT EXISTS status TEXT`,
@@ -333,8 +345,9 @@ export async function ensureDb() {
   ]);
 
   // Defaults for existing rows where columns were just added (parameterized)
-  await q(`UPDATE outlet_sessions SET visibility = COALESCE(visibility, 'private')`);
-  await q(`UPDATE outlet_sessions SET status = COALESCE(status, 'open')`);
+  await q(`UPDATE outlet_sessions SET kind = COALESCE(NULLIF(kind, ''), 'outlet')`);
+  await q(`UPDATE outlet_sessions SET visibility = COALESCE(NULLIF(visibility, ''), 'private')`);
+  await q(`UPDATE outlet_sessions SET status = COALESCE(NULLIF(status, ''), 'open')`);
   await q(`UPDATE outlet_sessions SET risk_level = COALESCE(risk_level, 0)`);
   await q(`UPDATE outlet_sessions SET message_count = COALESCE(message_count, 0)`);
   await q(`UPDATE outlet_sessions SET created_at = COALESCE(created_at, updated_at, $1)`, [now]);
@@ -926,6 +939,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as sessions_open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as sessions_escalated,
       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as sessions_closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as sessions_resolved,
       AVG(risk_level)::float as risk_avg
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
@@ -942,7 +956,8 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       AVG(risk_level)::float as risk_avg,
       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)::int as open,
       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END)::int as escalated,
-      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)::int as closed,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END)::int as resolved
     FROM outlet_sessions
     WHERE org_id = $1 AND created_at >= $2
     GROUP BY 1
@@ -971,6 +986,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       s.id as session_id,
       s.user_id,
       u.username,
+      s.kind,
       s.status,
       s.visibility,
       s.category,
@@ -994,6 +1010,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: totals.sessions_open ?? 0,
       escalated: totals.sessions_escalated ?? 0,
       closed: totals.sessions_closed ?? 0,
+      resolved: totals.sessions_resolved ?? 0,
       riskAvg: totals.risk_avg ?? null,
     },
     byCategory: (byCategory || []).map((r: any) => ({
@@ -1003,6 +1020,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       open: r.open,
       escalated: r.escalated,
       closed: r.closed,
+      resolved: r.resolved,
     })),
     byDay: (byDay || []).map((r: any) => ({
       dayKey: r.day_key,
@@ -1013,6 +1031,7 @@ export async function outletAnalyticsSummary(params: { orgId: string; days?: num
       sessionId: r.session_id,
       userId: r.user_id,
       username: r.username,
+      kind: normalizeKind(r.kind),
       status: normalizeStatus(r.status),
       visibility: normalizeVisibility(r.visibility),
       category: r.category ?? null,
@@ -1249,6 +1268,7 @@ export async function listUserNotes(params: { orgId: string; userId: string; lim
 export async function createOutletSession(params: {
   orgId: string;
   userId: string;
+  kind?: OutletKind; // ✅ Option B support
   category?: string | null;
   visibility?: OutletVisibility;
   riskLevel?: number;
@@ -1258,6 +1278,7 @@ export async function createOutletSession(params: {
     id: nanoid(),
     orgId: params.orgId,
     userId: params.userId,
+    kind: normalizeKind(params.kind),
     visibility: (params.visibility ?? "private") as OutletVisibility,
     category: (params.category ?? null)?.trim?.() ?? params.category ?? null,
     status: "open" as OutletStatus,
@@ -1274,16 +1295,17 @@ export async function createOutletSession(params: {
 
   await q(
     `INSERT INTO outlet_sessions (
-        id, org_id, user_id, visibility, category, status, risk_level,
+        id, org_id, user_id, kind, visibility, category, status, risk_level,
         last_message_at, last_sender, message_count,
         resolution_note, resolved_by_user_id, resolved_at,
         created_at, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
     [
       row.id,
       row.orgId,
       row.userId,
+      row.kind,
       row.visibility,
       row.category,
       row.status,
@@ -1311,6 +1333,7 @@ export async function getOutletSession(params: { orgId: string; sessionId: strin
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1340,6 +1363,7 @@ export async function listOutletSessionsForUser(params: { orgId: string; userId:
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1398,6 +1422,7 @@ export async function listOutletSessionsForStaff(params: { orgId: string; role: 
     id: r.id,
     orgId: r.org_id,
     userId: r.user_id,
+    kind: normalizeKind(r.kind),
     visibility: normalizeVisibility(r.visibility),
     category: r.category ?? null,
     status: normalizeStatus(r.status),
@@ -1494,16 +1519,23 @@ export async function escalateOutletSession(params: {
     params.sessionId,
   ]);
 
-  // Optional: also notify user (keeps Inbox active)
-  await createInboxItem({
-    orgId: params.orgId,
-    userId: (await q<any>("SELECT user_id FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]))[0]
-      ?.user_id,
-    type: "outlet_escalation",
-    title: "Your session was escalated",
-    body: params.reason ? `Reason: ${params.reason}` : "A staff member has been notified.",
-    severity: 1,
-  }).catch(() => {});
+  // Optional: also notify user (keeps Inbox active) — ✅ guarded (no silent undefined userId)
+  try {
+    const ownerRows = await q<any>("SELECT user_id FROM outlet_sessions WHERE org_id = $1 AND id = $2", [params.orgId, params.sessionId]);
+    const ownerId = ownerRows[0]?.user_id ? String(ownerRows[0].user_id) : null;
+    if (ownerId) {
+      await createInboxItem({
+        orgId: params.orgId,
+        userId: ownerId,
+        type: "outlet_escalation",
+        title: "Your session was escalated",
+        body: params.reason ? `Reason: ${params.reason}` : "A staff member has been notified.",
+        severity: 1,
+      });
+    }
+  } catch {
+    // ignore (notification is optional)
+  }
 
   return esc;
 }
@@ -1531,7 +1563,7 @@ export async function resolveOutletSession(params: {
     WITH upd AS (
       UPDATE outlet_sessions
       SET
-        status = 'closed',
+        status = 'resolved',
         resolution_note = $1,
         resolved_by_user_id = $2,
         resolved_at = $3,
